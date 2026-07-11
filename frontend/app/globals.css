@@ -1,0 +1,88 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --background: 0 0% 100%;
+  --foreground: 220 15% 10%;
+  --card: 0 0% 100%;
+  --card-foreground: 220 15% 10%;
+  --primary: 142 70% 36%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 210 20% 94%;
+  --secondary-foreground: 220 15% 10%;
+  --muted: 210 20% 94%;
+  --muted-foreground: 216 12% 42%;
+  --accent: 204 96% 38%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 72% 45%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 214 18% 87%;
+  --input: 214 18% 87%;
+  --ring: 142 70% 36%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: Arial, "Noto Sans TC", sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 3px solid #16a34a;
+  outline-offset: 3px;
+}
+
+.article-body {
+  font-size: 1.0625rem;
+  line-height: 1.8;
+}
+
+.article-body h2 {
+  margin-top: 2rem;
+  font-size: 1.5rem;
+}
+
+.article-body h3 {
+  margin-top: 1.5rem;
+  font-size: 1.25rem;
+}
+
+.article-body a {
+  color: #0477bf;
+  text-decoration: underline;
+}
+@layer components {
+  .terms-content h2 {
+    @apply mt-10 text-2xl font-bold;
+  }
+
+  .terms-content h2 + p,
+  .terms-content h2 + ul {
+    @apply mt-3;
+  }
+
+  .terms-content p,
+  .terms-content li {
+    @apply leading-8 text-zinc-700;
+  }
+
+  .terms-content ul {
+    @apply list-disc space-y-1 pl-6;
+  }
+}

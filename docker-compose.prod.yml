@@ -1,0 +1,35 @@
+services:
+  postgres:
+    restart: unless-stopped
+    ports: []
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  backend:
+    restart: unless-stopped
+    ports: []
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  frontend:
+    restart: unless-stopped
+    ports: []
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  nginx:
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/conf.d:/etc/nginx/conf.d:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+
