@@ -19,6 +19,7 @@ frontend/.env.local
 
 prd_phase7.md
 prd.md
+bug.md
 .agents/
 docs/
 backups/
