@@ -1,0 +1,17 @@
+steps:
+  - id: deploy-to-compute-engine
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - compute
+      - ssh
+      - voltscope@voltscope
+      - --project=project-c02ae071-e5c5-4fc4-9dc
+      - --zone=us-west1-b
+      - --command=sudo /opt/voltscope/deploy.sh
+      - --quiet
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1200s
