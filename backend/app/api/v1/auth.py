@@ -67,7 +67,6 @@ async def register(payload: RegisterRequest, session: SessionDep) -> RegisterRes
     await session.refresh(user)
     return RegisterResponse(
         user=serialize_user(user),
-        verification_url=verification_url if settings.app_env == "local" else None,
     )
 
 

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AnyHttpUrl, Field
+from pydantic import AnyHttpUrl, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     content_pipeline_min_zh_chars: int = 600
     content_pipeline_min_en_words: int = 500
     content_pipeline_max_source_sentence_overlap: float = 0.15
+
+    @model_validator(mode="after")
+    def validate_production_urls(self) -> "Settings":
+        if not self.is_production:
+            return self
+        if self.frontend_url.scheme != "https" or self.frontend_url.host in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("FRONTEND_URL must be a public HTTPS URL in production")
+        return self
 
     @property
     def is_production(self) -> bool:

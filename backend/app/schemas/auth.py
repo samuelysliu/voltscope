@@ -27,7 +27,6 @@ class UserOut(BaseModel):
 
 class RegisterResponse(BaseModel):
     user: UserOut
-    verification_url: str | None = None
 
 
 class VerifyEmailResponse(BaseModel):

@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import { Button } from "@/src/components/ui/button";
 import { Input } from "@/src/components/ui/input";
 import { authApiBase } from "./auth";
@@ -11,13 +10,13 @@ export function RegisterForm() {
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const [verificationUrl, setVerificationUrl] = useState<string | null>(null);
+  const [isRegistered, setIsRegistered] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
-    setVerificationUrl(null);
+    setIsRegistered(false);
     setIsSubmitting(true);
     try {
       const response = await fetch(`${authApiBase()}/auth/register`, {
@@ -29,11 +28,21 @@ export function RegisterForm() {
         setError("註冊失敗，請確認 Email 未被使用且密碼至少 8 字元。");
         return;
       }
-      const data = (await response.json()) as { verification_url?: string | null };
-      setVerificationUrl(data.verification_url || null);
+      setIsRegistered(true);
     } finally {
       setIsSubmitting(false);
     }
+  }
+
+  if (isRegistered) {
+    return (
+      <div className="mt-6 rounded-lg border border-line bg-panel p-4 text-sm" role="status" aria-live="polite">
+        <p className="font-semibold">驗證信已發出</p>
+        <p className="mt-2 text-zinc-700">
+          請前往 <span className="font-semibold text-zinc-900">{email}</span> 查看電子郵件，並依照信件內容完成驗證。
+        </p>
+      </div>
+    );
   }
 
   return (
@@ -56,14 +65,6 @@ export function RegisterForm() {
           {isSubmitting ? "註冊中..." : "註冊"}
         </Button>
       </form>
-      {verificationUrl ? (
-        <div className="mt-6 rounded-lg border border-line bg-panel p-4 text-sm">
-          <p className="font-semibold">驗證信已建立。</p>
-          <a className="mt-2 block break-all text-signal underline" href={verificationUrl.replace(/^https?:\/\/[^/]+/, "")}>
-            {verificationUrl}
-          </a>
-        </div>
-      ) : null}
     </div>
   );
 }

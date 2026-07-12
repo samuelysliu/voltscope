@@ -26,6 +26,7 @@ from app.models import (
     ContentCandidate,
     CrawlerRun,
     DailyContentReport,
+    EmailVerificationToken,
     MistralGenerationLog,
     SelectorRepairProposal,
     SourceParserVersion,
@@ -1411,6 +1412,8 @@ async def delete_admin_user(user_id: str, session: SessionDep, admin: User = Dep
         raise AppError("USER_NOT_FOUND", "User not found", 404)
     if user.id == admin.id:
         raise AppError("ADMIN_SELF_DELETE_NOT_ALLOWED", "Administrators cannot delete their own account", 409)
+    await session.execute(delete(EmailVerificationToken).where(EmailVerificationToken.user_id == user.id))
+    user.email = f"deleted-{user.id}@users.invalid"
     user.is_active = False
     user.deleted_at = datetime.now(UTC)
     await session.commit()
