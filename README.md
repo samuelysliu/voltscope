@@ -158,6 +158,11 @@ EMAIL_FROM=VoltScope <no-reply@example.com>
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
+  ## migration
+  ```bash
+  docker compose -f docker-compose.yml -f docker-compose.dev.yml exec backend alembic upgrade head
+  ```
+
 ### 3. 初始化資料庫
 
 ```bash

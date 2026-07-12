@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     jwt_secret: str = Field(default="dev-only-secret-change-me", min_length=16)
-    jwt_access_token_expire_minutes: int = 30
+    jwt_access_token_expire_minutes: int = 10080
     jwt_refresh_token_expire_days: int = 14
     default_admin_email: str = "admin@example.com"
     default_admin_password: str = "change-me-now"
