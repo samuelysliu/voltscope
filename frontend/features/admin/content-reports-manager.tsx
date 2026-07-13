@@ -89,6 +89,11 @@ function score(value: number | null) {
   return value === null ? "-" : value.toFixed(2);
 }
 
+function reportMetric(report: DailyReport | null | undefined, key: string) {
+  const value = report?.quota_detail[key];
+  return typeof value === "number" ? value : 0;
+}
+
 function statusLabel(value: string | undefined) {
   const labels: Record<string, string> = {
     success: "成功",
@@ -233,10 +238,12 @@ export function ContentReportsManager() {
               <CardTitle>{"每日配額"}</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid gap-3 text-sm md:grid-cols-5">
+              <div className="grid gap-3 text-sm md:grid-cols-7">
                 <p><strong>{"報表日期"}</strong><br />{latest?.report_date || "-"}</p>
                 <p><strong>{"已發布"}</strong><br />{latest?.total_published ?? 0}</p>
                 <p><strong>{"待審草稿"}</strong><br />{latest?.total_ready_for_review ?? 0}</p>
+                <p><strong>{"成功／目標"}</strong><br />{reportMetric(latest, "successful_total")} / {reportMetric(latest, "daily_min_articles")}</p>
+                <p><strong>{"嘗試／失敗"}</strong><br />{reportMetric(latest, "attempted_total")} / {reportMetric(latest, "generation_failure_total")}</p>
                 <p><strong>{"台灣來源"}</strong><br />{latest?.taiwan_media_count ?? 0}</p>
                 <p><strong>{"國際來源"}</strong><br />{latest?.international_count ?? 0}</p>
               </div>
@@ -346,9 +353,11 @@ export function ContentReportsManager() {
                 </div>
                 <span className="rounded border border-line px-2 py-1 text-xs">{statusLabel(report.status)}</span>
               </div>
-              <div className="grid gap-2 text-sm md:grid-cols-5">
+              <div className="grid gap-2 text-sm md:grid-cols-7">
                 <p><strong>{"已發布"}</strong><br />{report.total_published}</p>
                 <p><strong>{"待審草稿"}</strong><br />{report.total_ready_for_review}</p>
+                <p><strong>{"成功／目標"}</strong><br />{reportMetric(report, "successful_total")} / {reportMetric(report, "daily_min_articles")}</p>
+                <p><strong>{"嘗試／失敗"}</strong><br />{reportMetric(report, "attempted_total")} / {reportMetric(report, "generation_failure_total")}</p>
                 <p><strong>{"台灣"}</strong><br />{report.taiwan_media_count}</p>
                 <p><strong>{"國際"}</strong><br />{report.international_count}</p>
                 <p><strong>{"配額"}</strong><br />{quotaLabel(report.quota_met)}</p>

@@ -216,16 +216,19 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --force-rec
 ```env
 MISTRAL_API_KEY=
 MISTRAL_MODEL=mistral-large-latest
+MISTRAL_REVIEW_MODEL=
 MISTRAL_REQUEST_TIMEOUT_SECONDS=60
 MISTRAL_MAX_RETRIES=3
 
 CONTENT_PIPELINE_DAILY_ENABLED=true
 CONTENT_PIPELINE_AUTO_PUBLISH=false
-CONTENT_PIPELINE_DAILY_MIN_ARTICLES=3
+CONTENT_PIPELINE_DAILY_MIN_ARTICLES=5
 CONTENT_PIPELINE_DAILY_TAIWAN_MEDIA_MIN=1
 CONTENT_PIPELINE_DAILY_INTERNATIONAL_MIN=2
 CONTENT_PIPELINE_TIMEZONE=Asia/Taipei
 CONTENT_PIPELINE_DAILY_HOUR=5
+CONTENT_PIPELINE_MIN_ZH_CHARS=600
+CONTENT_PIPELINE_MIN_EN_WORDS=400
 ```
 
 未設定 `MISTRAL_API_KEY` 時，仍可管理來源與候選內容，但無法執行 AI 產文。建議維持 `CONTENT_PIPELINE_AUTO_PUBLISH=false`，由管理者完成審核。
@@ -241,6 +244,15 @@ CONTENT_PIPELINE_DAILY_HOUR=5
   -> 品質檢查與修訂
   -> 人工審核
   -> 發布與每日報表
+```
+
+預設來源涵蓋 Yahoo 汽車、U-CAR、公視、科技新報、InsideEVs、Electrek、Charged EVs、The Driven、CleanTechnica 與台灣充電營運商。RSS 來源優先讀取結構化 feed；HTML 來源則解析主題列表。Yahoo 汽車若主題頁被 consent 頁面攔截或沒有文章，會退回首頁並只保留電動車相關標題。
+
+部署新版本後需執行一次來源同步，更新既有 Yahoo URL 並加入新來源：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec \
+  -e PYTHONPATH=/app backend python scripts/seed_content_sources.py
 ```
 
 ## 測試與品質檢查

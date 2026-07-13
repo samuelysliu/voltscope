@@ -200,6 +200,15 @@ async def select_quota_candidates(
     international_min: int = 2,
     total_min: int = 3,
 ) -> list[ContentCandidate]:
+    candidates = await rank_quota_candidates(session, taiwan_min, international_min)
+    return candidates[:total_min]
+
+
+async def rank_quota_candidates(
+    session: AsyncSession,
+    taiwan_min: int = 1,
+    international_min: int = 2,
+) -> list[ContentCandidate]:
     stmt = (
         select(ContentCandidate)
         .where(ContentCandidate.decision == "pending")
@@ -218,8 +227,6 @@ async def select_quota_candidates(
     take("taiwan_media", taiwan_min)
     take("international_media", international_min)
     for item in candidates:
-        if len(selected) >= total_min:
-            break
         if item not in selected:
             selected.append(item)
     return selected

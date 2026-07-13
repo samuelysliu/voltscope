@@ -37,7 +37,7 @@ class Settings(BaseSettings):
 
     content_pipeline_daily_enabled: bool = True
     content_pipeline_auto_publish: bool = False
-    content_pipeline_daily_min_articles: int = 3
+    content_pipeline_daily_min_articles: int = 5
     content_pipeline_daily_taiwan_media_min: int = 1
     content_pipeline_daily_international_min: int = 2
     content_pipeline_timezone: str = "Asia/Taipei"
@@ -48,13 +48,14 @@ class Settings(BaseSettings):
 
     mistral_api_key: str = ""
     mistral_model: str = "mistral-large-latest"
+    mistral_review_model: str = ""
     mistral_request_timeout_seconds: int = 60
     mistral_max_retries: int = 3
-    mistral_prompt_version: str = "content-pipeline-v3"
+    mistral_prompt_version: str = "content-pipeline-v4"
 
     content_pipeline_min_zh_chars: int = 600
-    content_pipeline_min_en_words: int = 500
-    content_pipeline_max_source_sentence_overlap: float = 0.15
+    content_pipeline_min_en_words: int = 400
+    content_pipeline_max_source_sentence_overlap: float = 0.35
 
     @model_validator(mode="after")
     def validate_production_urls(self) -> "Settings":

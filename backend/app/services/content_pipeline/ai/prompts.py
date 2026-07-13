@@ -1,6 +1,18 @@
 import json
 
+from app.core.config import get_settings
 from app.models import ContentCandidate
+
+
+def article_length_requirement(locale: str) -> tuple[int, str]:
+    settings = get_settings()
+    if locale == "zh-TW":
+        minimum = settings.content_pipeline_min_zh_chars
+        target = max(minimum + 50, 650)
+        return minimum, f"at least {target} CJK characters"
+    minimum = settings.content_pipeline_min_en_words
+    target = max(minimum + 50, 450)
+    return minimum, f"at least {target} English words"
 
 
 def candidate_context(candidate: ContentCandidate, source_material: str | None = None) -> str:
@@ -54,6 +66,8 @@ def article_generation_messages(
     source_material: str | None = None,
 ) -> list[dict[str, str]]:
     language = "Traditional Chinese" if locale == "zh-TW" else "English"
+    minimum, length_requirement = article_length_requirement(locale)
+    unit = "CJK characters" if locale == "zh-TW" else "English words"
     return [
         {
             "role": "system",
@@ -73,8 +87,8 @@ def article_generation_messages(
             "content": (
                 f"Write a {language} article. Return JSON with keys: title, slug, excerpt, html, text, "
                 "seo_title, seo_description. Use p, h2, and a tags in HTML. Include one source link using the exact source_url. "
-                "The text field must contain at least 650 CJK characters for zh-TW or at least 520 English words. "
-                "Treat anything shorter as invalid, but never invent facts to reach length. "
+                f"The article body in both html and text must contain {length_requirement}; the publication gate is {minimum} {unit}. "
+                "Count the article body before responding and aim above the gate, but never invent facts to reach length. "
                 "Open with the most newsworthy verified event and its concrete scale or consequence. Follow with evidence, "
                 "chronology, technical or regulatory context explicitly present in the notes, affected stakeholders, and the official response. "
                 "Use descriptive h2 headings only when they improve a long article; never use generic headings such as Report Highlights, "
@@ -94,9 +108,12 @@ def article_revision_messages(
     locale: str,
     draft: dict,
     issue_codes: list[str],
+    quality_metrics: dict | None = None,
 ) -> list[dict[str, str]]:
     language = "Traditional Chinese" if locale == "zh-TW" else "English"
-    length_requirement = "650-1000 CJK characters" if locale == "zh-TW" else "520-800 words"
+    minimum, length_requirement = article_length_requirement(locale)
+    current_length = (quality_metrics or {}).get("zh_chars" if locale == "zh-TW" else "en_words", "unknown")
+    unit = "CJK characters" if locale == "zh-TW" else "English words"
     return [
         {
             "role": "system",
@@ -110,13 +127,50 @@ def article_revision_messages(
             "role": "user",
             "content": (
                 f"Rewrite this {language} article. Return all keys: title, slug, excerpt, html, text, seo_title, seo_description. "
-                f"The text field must contain {length_requirement}; count it before responding. Use p, h2, and a tags in HTML, "
+                f"The current article has {current_length} {unit}; the publication minimum is {minimum}. "
+                f"Rewrite the complete article to contain {length_requirement} in both html and text, and count only the article body. "
+                "Do not summarize or shorten sections that are supported by the factual record. Use p, h2, and a tags in HTML, "
                 f"and include the exact source URL {candidate.source_url}. For Traditional Chinese, the headline must state the event "
                 "in natural Taiwan news language rather than retaining the English source headline. Do not mention the editing process, "
                 "missing context, or Taiwan unless the facts directly involve Taiwan.\n\n"
                 f"Failed checks: {json.dumps(issue_codes)}\n\n"
                 f"Factual record: {json.dumps(factual_notes, ensure_ascii=False)}\n\n"
                 f"Draft to rewrite: {json.dumps(draft, ensure_ascii=False)}"
+            ),
+        },
+    ]
+
+
+def article_review_messages(
+    candidate: ContentCandidate,
+    factual_notes: dict,
+    locale: str,
+    draft: dict,
+) -> list[dict[str, str]]:
+    language = "Traditional Chinese" if locale == "zh-TW" else "English"
+    minimum, length_requirement = article_length_requirement(locale)
+    unit = "CJK characters" if locale == "zh-TW" else "English words"
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are an independent senior news editor for VoltScope. The draft was written by another agent. "
+                "Return strict JSON only. Rewrite the complete story into publication-quality news copy while preserving only "
+                "facts in the supplied record. Correct weak leads, generic filler, unsupported implications, poor attribution, "
+                "unnatural translation, repetition, and source-like phrasing. Never discuss the review process in the article."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Review and rewrite this {language} draft. Return all keys: title, slug, excerpt, html, text, seo_title, "
+                f"seo_description. The article body must contain {length_requirement} in both html and text; the publication gate is "
+                f"{minimum} {unit}. Count the body before responding and do not shorten a draft below that gate. "
+                "Use descriptive news structure and include one "
+                f"source link using the exact URL {candidate.source_url}. Do not invent facts to meet the length target. "
+                "For Traditional Chinese, use natural Taiwan news language and translate the meaning of the headline.\n\n"
+                f"Factual record: {json.dumps(factual_notes, ensure_ascii=False)}\n\n"
+                f"Writer draft: {json.dumps(draft, ensure_ascii=False)}"
             ),
         },
     ]

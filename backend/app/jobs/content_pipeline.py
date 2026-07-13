@@ -14,7 +14,7 @@ from app.core.redis import get_redis
 from app.db.session import AsyncSessionLocal
 from app.models import Article, ArticleTranslation, ContentCandidate, DailyContentReport, SourceWhitelist, User
 from app.services.content_pipeline.ai.article_generator import generate_article_from_candidate
-from app.services.content_pipeline.candidates import crawl_source_to_candidates, select_quota_candidates
+from app.services.content_pipeline.candidates import crawl_source_to_candidates, rank_quota_candidates
 
 LOCK_SECONDS = 60 * 60
 
@@ -84,6 +84,32 @@ def report_counts(candidates: list[ContentCandidate], generated_articles: list[A
         "international_count": selected_by_category["international_media"],
         "event_driven_count": selected_by_category["event_driven"],
     }
+
+
+def next_generation_candidate(
+    candidates: list[ContentCandidate],
+    attempted_ids: set[str],
+    successful_candidates: list[ContentCandidate],
+    taiwan_min: int,
+    international_min: int,
+) -> ContentCandidate | None:
+    remaining = [candidate for candidate in candidates if candidate.id not in attempted_ids]
+    if not remaining:
+        return None
+    taiwan_successes = len([candidate for candidate in successful_candidates if candidate.quota_category == "taiwan_media"])
+    international_successes = len(
+        [candidate for candidate in successful_candidates if candidate.quota_category == "international_media"]
+    )
+    preferred_category = None
+    if taiwan_successes < taiwan_min:
+        preferred_category = "taiwan_media"
+    elif international_successes < international_min:
+        preferred_category = "international_media"
+    if preferred_category:
+        preferred = next((candidate for candidate in remaining if candidate.quota_category == preferred_category), None)
+        if preferred is not None:
+            return preferred
+    return remaining[0]
 
 
 async def run_scheduled_publish(session: AsyncSession) -> int:
@@ -167,25 +193,45 @@ async def run_daily_content_pipeline(
             except Exception as exc:
                 failed_sources.append({"id": source.id, "name": source.name, "error": str(exc)[:500]})
 
-        selected = await select_quota_candidates(
+        candidate_pool = await rank_quota_candidates(
             session,
             settings.content_pipeline_daily_taiwan_media_min,
             settings.content_pipeline_daily_international_min,
-            settings.content_pipeline_daily_min_articles,
         )
         generated_articles: list[Article] = []
         generated_ids: list[str] = []
+        attempted_candidates: list[ContentCandidate] = []
+        successful_candidates: list[ContentCandidate] = []
+        generation_failures: list[dict] = []
         if not dry_run:
             admin = await get_pipeline_admin(session)
-            for candidate in selected:
+            attempted_ids: set[str] = set()
+            while len(generated_articles) < settings.content_pipeline_daily_min_articles:
+                candidate = next_generation_candidate(
+                    candidate_pool,
+                    attempted_ids,
+                    successful_candidates,
+                    settings.content_pipeline_daily_taiwan_media_min,
+                    settings.content_pipeline_daily_international_min,
+                )
+                if candidate is None:
+                    break
+                attempted_ids.add(candidate.id)
+                attempted_candidates.append(candidate)
                 try:
                     result = await generate_article_from_candidate(session, candidate.id, admin)
                     generated_articles.append(result.article)
                     generated_ids.append(result.article.id)
+                    successful_candidates.append(candidate)
                 except Exception as exc:
-                    candidate.decision = "failed"
-                    candidate.rejection_reason = "generation_failed"
-                    failed_sources.append({"candidate_id": candidate.id, "source_id": candidate.source_id, "error": str(exc)[:500]})
+                    if candidate.decision != "failed":
+                        candidate.decision = "failed"
+                    candidate.rejection_reason = candidate.rejection_reason or "generation_failed"
+                    generation_failures.append(
+                        {"candidate_id": candidate.id, "source_id": candidate.source_id, "error": str(exc)[:500]}
+                    )
+        else:
+            attempted_candidates = candidate_pool[: settings.content_pipeline_daily_min_articles]
 
         degraded_rows = (
             await session.execute(select(SourceWhitelist).where(SourceWhitelist.health_status.in_(["degraded", "failed"])))
@@ -195,19 +241,24 @@ async def run_daily_content_pipeline(
             for source in degraded_rows
         )
 
-        counts = report_counts(selected, generated_articles)
+        counts = report_counts(successful_candidates, generated_articles)
         quota_met = (
             counts["taiwan_media_count"] >= settings.content_pipeline_daily_taiwan_media_min
             and counts["international_count"] >= settings.content_pipeline_daily_international_min
-            and len(selected) >= settings.content_pipeline_daily_min_articles
+            and len(generated_articles) >= settings.content_pipeline_daily_min_articles
         )
         status = "success" if quota_met and not failed_sources and not dry_run else "warning"
-        if not selected:
+        if not attempted_candidates:
             status = "failed"
         quota_detail = {
             "dry_run": dry_run,
-            "selected_candidate_ids": [item.id for item in selected],
-            "selected_total": len(selected),
+            "candidate_pool_total": len(candidate_pool),
+            "attempted_candidate_ids": [item.id for item in attempted_candidates],
+            "attempted_total": len(attempted_candidates),
+            "successful_candidate_ids": [item.id for item in successful_candidates],
+            "successful_total": len(generated_articles),
+            "generation_failure_total": len(generation_failures),
+            "generation_failures": generation_failures,
             "daily_min_articles": settings.content_pipeline_daily_min_articles,
             "taiwan_min": settings.content_pipeline_daily_taiwan_media_min,
             "international_min": settings.content_pipeline_daily_international_min,
@@ -231,7 +282,7 @@ async def run_daily_content_pipeline(
         return PipelineRunResult(
             report=report,
             generated_article_ids=generated_ids,
-            selected_candidate_ids=[item.id for item in selected],
+            selected_candidate_ids=[item.id for item in attempted_candidates],
         )
     finally:
         with suppress(Exception):

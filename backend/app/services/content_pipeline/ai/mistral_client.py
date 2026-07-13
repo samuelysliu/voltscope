@@ -59,7 +59,7 @@ class MistralClient:
         }
         last_error: Exception | None = None
         configured_attempts = max(1, self.settings.mistral_max_retries)
-        if purpose.endswith("_revision"):
+        if purpose.endswith(("_revision", "_review")):
             attempts = min(2, configured_attempts)
         elif purpose.endswith("_generation"):
             attempts = min(2, configured_attempts)
@@ -74,7 +74,7 @@ class MistralClient:
                     retry_instruction = (
                         "The previous revision was too short or still failed a quality check. Rewrite the complete article, "
                         "meet the requested article length, paraphrase every source sentence, and return one valid JSON object."
-                        if purpose.endswith("_revision")
+                        if purpose.endswith(("_revision", "_review"))
                         else "The previous response was invalid or truncated. Return one compact JSON object only. "
                         "Keep every array concise, omit repetition, and close all JSON strings, arrays, and objects."
                     )

@@ -1,3 +1,4 @@
+import re
 from html import unescape
 from html.parser import HTMLParser
 
@@ -16,6 +17,9 @@ SKIP_PARTS = (
     "/tag/",
     "/terms",
 )
+
+YAHOO_AUTOS_LATIN_EV_KEYWORDS = ("bev", "electric", "ev", "hybrid", "phev")
+YAHOO_AUTOS_CJK_EV_KEYWORDS = ("充電", "油電", "純電", "電動", "電池")
 
 
 class ArticleLinkParser(HTMLParser):
@@ -60,6 +64,16 @@ def _looks_like_article(url: str, title: str) -> bool:
     return any(char.isdigit() for char in lower) or any(part in lower for part in ("/news", "/article", "/blog", "/post", "/story"))
 
 
+def _contains_yahoo_ev_keyword(title: str) -> bool:
+    lowered = title.lower()
+    if any(keyword in lowered for keyword in YAHOO_AUTOS_CJK_EV_KEYWORDS):
+        return True
+    return any(
+        re.search(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])", lowered)
+        for keyword in YAHOO_AUTOS_LATIN_EV_KEYWORDS
+    )
+
+
 def parse_html_candidates(raw_html: str, base_url: str, allowed_domain: str, limit: int) -> list[CrawledCandidate]:
     parser = ArticleLinkParser()
     parser.feed(raw_html)
@@ -78,6 +92,41 @@ def parse_html_candidates(raw_html: str, base_url: str, allowed_domain: str, lim
                 title=title[:500],
                 parser_type="html",
                 confidence_score=0.55,
+            )
+        )
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def parse_yahoo_autos_candidates(
+    raw_html: str,
+    base_url: str,
+    allowed_domain: str,
+    limit: int,
+    require_ev_keyword: bool = False,
+) -> list[CrawledCandidate]:
+    parser = ArticleLinkParser()
+    parser.feed(raw_html)
+    candidates: list[CrawledCandidate] = []
+    seen: set[str] = set()
+    for href, title in parser.links:
+        source_url = absolute_allowed_url(href, base_url, allowed_domain)
+        if not source_url or not source_url.lower().split("?", 1)[0].endswith(".html"):
+            continue
+        normalized_title = " ".join(title.split())
+        lowered_title = normalized_title.lower()
+        if require_ev_keyword and not _contains_yahoo_ev_keyword(lowered_title):
+            continue
+        if source_url in seen:
+            continue
+        seen.add(source_url)
+        candidates.append(
+            CrawledCandidate(
+                source_url=source_url,
+                title=normalized_title[:500],
+                parser_type="html",
+                confidence_score=0.8 if not require_ev_keyword else 0.7,
             )
         )
         if len(candidates) >= limit:

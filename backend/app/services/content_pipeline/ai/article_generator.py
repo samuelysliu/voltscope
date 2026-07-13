@@ -22,7 +22,12 @@ from app.models import (
     User,
 )
 from app.services.content_pipeline.ai.mistral_client import MistralClient, MistralJsonResult
-from app.services.content_pipeline.ai.prompts import article_generation_messages, article_revision_messages, factual_notes_messages
+from app.services.content_pipeline.ai.prompts import (
+    article_generation_messages,
+    article_review_messages,
+    article_revision_messages,
+    factual_notes_messages,
+)
 from app.services.content_pipeline.quality_gates import run_quality_gates
 from app.services.content_pipeline.source_material import fetch_candidate_source_material
 from app.services.article_classification import classify_generated_article
@@ -83,8 +88,7 @@ def normalize_article_payload(payload: dict) -> dict:
     normalized["html"] = sanitize_html(normalized["html"])
     html_with_breaks = re.sub(r"</(?:p|h[1-6]|li)>", "\n", normalized["html"], flags=re.IGNORECASE)
     html_text = " ".join(unescape(re.sub(r"<[^>]+>", " ", html_with_breaks)).split())
-    provided_text = " ".join(normalized.get("text", "").split())
-    normalized["text"] = html_text if len(html_text) > len(provided_text) * 1.2 else provided_text
+    normalized["text"] = html_text
     return normalized
 
 
@@ -248,6 +252,7 @@ async def generate_article_from_candidate(
 
     settings = get_settings()
     client = MistralClient()
+    review_client = MistralClient(settings.mistral_review_model or settings.mistral_model)
     started = datetime.now(UTC)
     if generation_job_id:
         job = await session.get(ArticleGenerationJob, generation_job_id)
@@ -309,6 +314,24 @@ async def generate_article_from_candidate(
                 article_generation_messages(candidate, notes, "en", source_material),
             )
         )
+        zh_payload = normalize_article_payload(
+            await generate_json(
+                session,
+                job,
+                review_client,
+                "zh_editor_review",
+                article_review_messages(candidate, notes, "zh-TW", zh_payload),
+            )
+        )
+        en_payload = normalize_article_payload(
+            await generate_json(
+                session,
+                job,
+                review_client,
+                "en_editor_review",
+                article_review_messages(candidate, notes, "en", en_payload),
+            )
+        )
         shared_revision_codes = {
             "generic_article_template_detected",
             "missing_source_attribution",
@@ -322,7 +345,7 @@ async def generate_article_from_candidate(
         }
         en_revision_codes = {"en_article_short", *shared_revision_codes}
         gate = run_quality_gates(candidate, zh_payload, en_payload)
-        for _ in range(2):
+        for _ in range(3):
             if gate["pass"]:
                 break
             issue_codes = {item["code"] for item in gate["issues"] if item["severity"] == "critical"}
@@ -335,7 +358,14 @@ async def generate_article_from_candidate(
                         job,
                         client,
                         "zh_revision",
-                        article_revision_messages(candidate, notes, "zh-TW", zh_payload, sorted(issue_codes.intersection(zh_revision_codes))),
+                        article_revision_messages(
+                            candidate,
+                            notes,
+                            "zh-TW",
+                            zh_payload,
+                            sorted(issue_codes.intersection(zh_revision_codes)),
+                            gate.get("metrics"),
+                        ),
                     )
                 )
             if issue_codes.intersection(en_revision_codes):
@@ -346,7 +376,14 @@ async def generate_article_from_candidate(
                         job,
                         client,
                         "en_revision",
-                        article_revision_messages(candidate, notes, "en", en_payload, sorted(issue_codes.intersection(en_revision_codes))),
+                        article_revision_messages(
+                            candidate,
+                            notes,
+                            "en",
+                            en_payload,
+                            sorted(issue_codes.intersection(en_revision_codes)),
+                            gate.get("metrics"),
+                        ),
                     )
                 )
             gate = run_quality_gates(candidate, zh_payload, en_payload)

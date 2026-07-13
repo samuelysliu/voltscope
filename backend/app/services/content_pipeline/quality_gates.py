@@ -71,7 +71,7 @@ def sentence_overlap_ratio(candidate: ContentCandidate, article_text: str) -> fl
                 return 1.0
             sentence_tokens = token_list(sentence)
             match = SequenceMatcher(None, phrase_tokens, sentence_tokens, autojunk=False).find_longest_match()
-            if match.size >= 8:
+            if match.size >= 10:
                 max_ratio = max(max_ratio, match.size / len(phrase_tokens))
     return round(max_ratio, 4)
 
