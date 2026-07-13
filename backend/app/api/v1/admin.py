@@ -50,7 +50,7 @@ from app.schemas.admin import (
     AdminContentCandidateListOut,
     AdminContentCandidateOut,
     AdminContentPipelineMonitoringOut,
-    AdminContentPipelineRunOut,
+    AdminContentPipelineRunAcceptedOut,
     AdminContentPipelineRunPayload,
     AdminCrawlerCandidateOut,
     AdminCrawlerRunOut,
@@ -74,7 +74,7 @@ from app.schemas.admin import (
     AdminUserUpdate,
 )
 from app.services.ai_ingest import approve_candidate_as_article, run_ai_ingest
-from app.jobs.content_pipeline import run_daily_content_pipeline
+from app.jobs.content_pipeline import run_manual_content_pipeline_background, upsert_report
 from app.services.content_pipeline.ai.article_generator import queue_article_generation, run_queued_article_generation
 from app.services.content_pipeline.candidates import crawl_source_to_candidates, select_quota_candidates
 from app.services.content_pipeline.crawlers.base import CrawledCandidate
@@ -865,14 +865,61 @@ async def reject_admin_selector_repair_proposal(
     return serialize_selector_repair_proposal(proposal)
 
 
-@router.post("/content-pipeline/run-now", response_model=AdminContentPipelineRunOut)
-async def run_admin_content_pipeline(payload: AdminContentPipelineRunPayload, session: SessionDep) -> AdminContentPipelineRunOut:
-    result = await run_daily_content_pipeline(session, payload.date, payload.force, payload.dry_run)
-    return AdminContentPipelineRunOut(
-        report=serialize_daily_content_report(result.report),
-        generated_article_ids=result.generated_article_ids,
-        selected_candidate_ids=result.selected_candidate_ids,
-        skipped=result.skipped,
+@router.post(
+    "/content-pipeline/run-now",
+    response_model=AdminContentPipelineRunAcceptedOut,
+    status_code=202,
+)
+async def run_admin_content_pipeline(
+    payload: AdminContentPipelineRunPayload,
+    background_tasks: BackgroundTasks,
+    session: SessionDep,
+) -> AdminContentPipelineRunAcceptedOut:
+    settings = get_settings()
+    if not payload.dry_run and not settings.mistral_api_key.strip():
+        raise AppError("AI_PROVIDER_NOT_CONFIGURED", "Mistral API key is not configured", 503)
+    report_date = payload.date or datetime.now(ZoneInfo(settings.content_pipeline_timezone)).date()
+    existing = await session.scalar(select(DailyContentReport).where(DailyContentReport.report_date == report_date))
+    running_is_current = bool(
+        existing is not None
+        and existing.status == "running"
+        and existing.updated_at >= datetime.now(UTC) - timedelta(hours=2)
+    )
+    if existing is not None and running_is_current:
+        existing_run_id = str((existing.quota_detail or {}).get("manual_run_id") or existing.id)
+        return AdminContentPipelineRunAcceptedOut(
+            run_id=existing_run_id,
+            report_date=report_date,
+            status="running",
+            already_running=True,
+        )
+
+    run_id = str(uuid4())
+    await upsert_report(
+        session,
+        report_date,
+        {
+            "status": "running",
+            "quota_detail": {
+                "manual_run_id": run_id,
+                "trigger": "manual",
+                "dry_run": payload.dry_run,
+            },
+            "message": "Manual content pipeline queued.",
+        },
+    )
+    await session.commit()
+    background_tasks.add_task(
+        run_manual_content_pipeline_background,
+        run_id,
+        report_date,
+        payload.force,
+        payload.dry_run,
+    )
+    return AdminContentPipelineRunAcceptedOut(
+        run_id=run_id,
+        report_date=report_date,
+        status="queued",
     )
 
 

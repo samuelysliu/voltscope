@@ -2,6 +2,7 @@ import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+import logging
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -17,6 +18,21 @@ from app.services.content_pipeline.ai.article_generator import generate_article_
 from app.services.content_pipeline.candidates import crawl_source_to_candidates, rank_quota_candidates
 
 LOCK_SECONDS = 60 * 60
+TRANSIENT_FAILURE_LIMIT = 3
+logger = logging.getLogger(__name__)
+
+TRANSIENT_ERROR_MARKERS = (
+    "connection",
+    "dns",
+    "name or service not known",
+    "network",
+    "rate limit",
+    "server disconnected",
+    "temporary failure",
+    "timed out",
+    "timeout",
+    "too many requests",
+)
 
 
 @dataclass
@@ -29,6 +45,30 @@ class PipelineRunResult:
 
 def lock_key(report_date: date) -> str:
     return f"lock:content_pipeline:daily:{report_date.isoformat()}"
+
+
+def pipeline_error_details(exc: Exception) -> tuple[str, str, object]:
+    if isinstance(exc, AppError):
+        return exc.code, exc.message, exc.details
+    return type(exc).__name__, str(exc).strip() or type(exc).__name__, None
+
+
+def is_retryable_pipeline_error(exc: Exception) -> bool:
+    code, message, details = pipeline_error_details(exc)
+    if code not in {"SOURCE_ARTICLE_FETCH_FAILED", "AI_GENERATION_FAILED"}:
+        return False
+    searchable = f"{message} {details}".lower()
+    return any(marker in searchable for marker in TRANSIENT_ERROR_MARKERS)
+
+
+def serialize_pipeline_error(exc: Exception) -> dict:
+    code, message, details = pipeline_error_details(exc)
+    return {
+        "code": code,
+        "message": message[:500],
+        "details": details,
+        "retryable": is_retryable_pipeline_error(exc),
+    }
 
 
 async def get_pipeline_admin(session: AsyncSession) -> User:
@@ -203,6 +243,8 @@ async def run_daily_content_pipeline(
         attempted_candidates: list[ContentCandidate] = []
         successful_candidates: list[ContentCandidate] = []
         generation_failures: list[dict] = []
+        consecutive_retryable_failures = 0
+        aborted_reason: str | None = None
         if not dry_run:
             admin = await get_pipeline_admin(session)
             attempted_ids: set[str] = set()
@@ -223,13 +265,22 @@ async def run_daily_content_pipeline(
                     generated_articles.append(result.article)
                     generated_ids.append(result.article.id)
                     successful_candidates.append(candidate)
+                    consecutive_retryable_failures = 0
                 except Exception as exc:
-                    if candidate.decision != "failed":
+                    error = serialize_pipeline_error(exc)
+                    if error["retryable"]:
+                        candidate.decision = "pending"
+                        candidate.rejection_reason = None
+                        consecutive_retryable_failures += 1
+                    else:
                         candidate.decision = "failed"
-                    candidate.rejection_reason = candidate.rejection_reason or "generation_failed"
+                        candidate.rejection_reason = candidate.rejection_reason or "generation_failed"
                     generation_failures.append(
-                        {"candidate_id": candidate.id, "source_id": candidate.source_id, "error": str(exc)[:500]}
+                        {"candidate_id": candidate.id, "source_id": candidate.source_id, "error": error}
                     )
+                    if consecutive_retryable_failures >= TRANSIENT_FAILURE_LIMIT:
+                        aborted_reason = "repeated_transient_generation_failures"
+                        break
         else:
             attempted_candidates = candidate_pool[: settings.content_pipeline_daily_min_articles]
 
@@ -250,6 +301,8 @@ async def run_daily_content_pipeline(
         status = "success" if quota_met and not failed_sources and not dry_run else "warning"
         if not attempted_candidates:
             status = "failed"
+        elif aborted_reason and not generated_articles:
+            status = "failed"
         quota_detail = {
             "dry_run": dry_run,
             "candidate_pool_total": len(candidate_pool),
@@ -259,6 +312,7 @@ async def run_daily_content_pipeline(
             "successful_total": len(generated_articles),
             "generation_failure_total": len(generation_failures),
             "generation_failures": generation_failures,
+            "aborted_reason": aborted_reason,
             "daily_min_articles": settings.content_pipeline_daily_min_articles,
             "taiwan_min": settings.content_pipeline_daily_taiwan_media_min,
             "international_min": settings.content_pipeline_daily_international_min,
@@ -274,7 +328,13 @@ async def run_daily_content_pipeline(
                 "quota_detail": quota_detail,
                 "failed_sources": failed_sources or None,
                 "degraded_sources": degraded_sources or None,
-                "message": "Dry run completed." if dry_run else "Daily content pipeline completed.",
+                "message": (
+                    "Dry run completed."
+                    if dry_run
+                    else "Content pipeline stopped after repeated temporary network failures. Please retry later."
+                    if aborted_reason
+                    else "Daily content pipeline completed."
+                ),
             },
         )
         await session.commit()
@@ -289,6 +349,39 @@ async def run_daily_content_pipeline(
             if acquired and not force:
                 await redis.delete(lock_key(target_date))
             await redis.aclose()
+
+
+async def run_manual_content_pipeline_background(
+    run_id: str,
+    report_date: date,
+    force: bool,
+    dry_run: bool,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await run_daily_content_pipeline(session, report_date, force, dry_run)
+            detail = dict(result.report.quota_detail or {})
+            detail.update({"manual_run_id": run_id, "trigger": "manual"})
+            result.report.quota_detail = detail
+            await session.commit()
+        except Exception as exc:
+            logger.exception("Manual content pipeline failed", extra={"run_id": run_id, "report_date": str(report_date)})
+            error = serialize_pipeline_error(exc)
+            report = await upsert_report(
+                session,
+                report_date,
+                {
+                    "status": "failed",
+                    "quota_detail": {
+                        "manual_run_id": run_id,
+                        "trigger": "manual",
+                        "error": error,
+                    },
+                    "message": error["message"],
+                },
+            )
+            await session.commit()
+            await session.refresh(report)
 
 
 def seconds_until_next_content_pipeline_run() -> float:

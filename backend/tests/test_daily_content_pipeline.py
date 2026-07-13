@@ -1,12 +1,20 @@
 from types import SimpleNamespace
 from typing import cast
 
+from fastapi import BackgroundTasks
+import pytest
+
+import app.api.v1.admin as admin_api
+from app.core.errors import AppError
 from app.core.config import Settings
-from app.jobs.content_pipeline import next_generation_candidate, report_counts
-from app.models import ContentCandidate
+from app.jobs.content_pipeline import is_retryable_pipeline_error, next_generation_candidate, report_counts
+from app.models import ContentCandidate, SourceWhitelist
+from app.schemas.admin import AdminContentPipelineRunPayload
 from app.services.content_pipeline.ai.article_generator import normalize_article_payload
 from app.services.content_pipeline.ai.mistral_client import MistralClient
 from app.services.content_pipeline.ai.prompts import article_review_messages, article_revision_messages
+from app.services.content_pipeline.candidates import create_candidate_from_crawl
+from app.services.content_pipeline.crawlers.base import CrawledCandidate
 from app.services.content_pipeline.quality_gates import count_en_words, sentence_overlap_ratio
 
 
@@ -127,3 +135,79 @@ def test_english_revision_prompt_receives_measured_length_and_buffered_target() 
     assert "current article has 327 English words" in instruction
     assert "publication minimum is 400" in instruction
     assert "at least 450 English words" in instruction
+
+
+def test_dns_failure_is_retryable_but_quality_failure_is_not() -> None:
+    dns_error = AppError(
+        "SOURCE_ARTICLE_FETCH_FAILED",
+        "Unable to read the original article",
+        422,
+        {"reason": "[Errno -2] Name or service not known"},
+    )
+    quality_error = AppError("ARTICLE_GENERATION_QUALITY_GATE_FAILED", "Generated article failed quality gate", 422)
+
+    assert is_retryable_pipeline_error(dns_error) is True
+    assert is_retryable_pipeline_error(quality_error) is False
+
+
+@pytest.mark.asyncio
+async def test_recrawled_transient_failure_returns_to_pending() -> None:
+    existing = cast(
+        ContentCandidate,
+        SimpleNamespace(
+            decision="failed",
+            rejection_reason="generation_failed",
+            fetched_at=None,
+        ),
+    )
+
+    class ExistingCandidateSession:
+        async def scalar(self, statement: object) -> ContentCandidate:
+            return existing
+
+    source = cast(SourceWhitelist, SimpleNamespace(id="source-1"))
+    crawled = CrawledCandidate(source_url="https://example.com/news/1", title="EV charging update")
+
+    result = await create_candidate_from_crawl(
+        cast(object, ExistingCandidateSession()),
+        source,
+        "crawler-run-1",
+        crawled,
+    )
+
+    assert result is None
+    assert existing.decision == "pending"
+    assert existing.rejection_reason is None
+    assert existing.fetched_at is not None
+
+
+@pytest.mark.asyncio
+async def test_manual_pipeline_endpoint_queues_background_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    class EmptySession:
+        committed = False
+
+        async def scalar(self, statement: object) -> None:
+            return None
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    async def fake_upsert_report(session: object, report_date: object, values: dict) -> SimpleNamespace:
+        assert values["status"] == "running"
+        return SimpleNamespace(id="report-1")
+
+    monkeypatch.setattr(admin_api, "upsert_report", fake_upsert_report)
+    session = EmptySession()
+    tasks = BackgroundTasks()
+
+    result = await admin_api.run_admin_content_pipeline(
+        AdminContentPipelineRunPayload(date="2026-07-13", dry_run=True),
+        tasks,
+        cast(object, session),
+    )
+
+    assert result.status == "queued"
+    assert result.report_date.isoformat() == "2026-07-13"
+    assert result.already_running is False
+    assert session.committed is True
+    assert len(tasks.tasks) == 1

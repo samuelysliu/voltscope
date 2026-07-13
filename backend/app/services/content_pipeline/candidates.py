@@ -140,6 +140,10 @@ async def create_candidate_from_crawl(
         select(ContentCandidate).where(ContentCandidate.source_id == source.id, ContentCandidate.normalized_hash == digest).limit(1)
     )
     if existing is not None:
+        if existing.decision == "failed" and existing.rejection_reason == "generation_failed":
+            existing.decision = "pending"
+            existing.rejection_reason = None
+            existing.fetched_at = datetime.now(UTC)
         return None
     fetched_at = datetime.now(UTC)
     item = ContentCandidate(

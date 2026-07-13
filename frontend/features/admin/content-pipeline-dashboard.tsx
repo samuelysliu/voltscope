@@ -36,6 +36,13 @@ type RunResult = {
   skipped: boolean;
 };
 
+type RunAccepted = {
+  run_id: string;
+  report_date: string;
+  status: "queued" | "running";
+  already_running: boolean;
+};
+
 function authHeaders(token: string) {
   return { authorization: `Bearer ${token}` };
 }
@@ -59,12 +66,21 @@ function reportMetric(report: DailyReport, key: string) {
   return typeof value === "number" ? value : 0;
 }
 
+function reportIds(report: DailyReport, key: string) {
+  const value = report.quota_detail[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function delay(milliseconds: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
 export function ContentPipelineDashboard() {
   const [token, setToken] = useState<string | null>(null);
   const [reports, setReports] = useState<DailyReport[]>([]);
   const [message, setMessage] = useState("");
   const [runDate, setRunDate] = useState(new Date().toISOString().slice(0, 10));
-  const [force, setForce] = useState(true);
+  const [force, setForce] = useState(false);
   const [dryRun, setDryRun] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [lastRun, setLastRun] = useState<RunResult | null>(null);
@@ -101,26 +117,56 @@ export function ContentPipelineDashboard() {
     if (!token) return;
     setIsRunning(true);
     setMessage("正在執行 AI 撈文，會從內容來源撈取候選文章並產生草稿...");
-    const response = await fetch(`${apiBase}/admin/content-pipeline/run-now`, {
-      method: "POST",
-      headers: { ...authHeaders(token), "content-type": "application/json" },
-      body: JSON.stringify({ date: runDate, force, dry_run: dryRun })
-    });
-    setIsRunning(false);
-    if (handleUnauthorized(response)) return;
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      setMessage(error.error?.message || "執行 AI 撈文失敗。");
-      return;
+    try {
+      const response = await fetch(`${apiBase}/admin/content-pipeline/run-now`, {
+        method: "POST",
+        headers: { ...authHeaders(token), "content-type": "application/json" },
+        body: JSON.stringify({ date: runDate, force, dry_run: dryRun })
+      });
+      if (handleUnauthorized(response)) return;
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        setMessage(error.error?.message || "執行 AI 撈文失敗。");
+        return;
+      }
+      const accepted = (await response.json()) as RunAccepted;
+      setMessage(accepted.already_running ? "此日期已有任務執行中，正在追蹤進度..." : "AI 撈文已排入背景執行，正在追蹤進度...");
+
+      for (let attempt = 0; attempt < 360; attempt += 1) {
+        await delay(5000);
+        const reportResponse = await fetch(`${apiBase}/admin/content-pipeline/reports/${accepted.report_date}`, {
+          headers: authHeaders(token)
+        });
+        if (handleUnauthorized(reportResponse)) return;
+        if (!reportResponse.ok) continue;
+        const report = (await reportResponse.json()) as DailyReport;
+        const reportRunId = report.quota_detail.manual_run_id;
+        if (report.status === "running" || (typeof reportRunId === "string" && reportRunId !== accepted.run_id)) continue;
+
+        const result: RunResult = {
+          report,
+          generated_article_ids: reportIds(report, "generated_article_ids"),
+          selected_candidate_ids: reportIds(report, "attempted_candidate_ids"),
+          skipped: report.quota_detail.skipped === "lock_exists"
+        };
+        setLastRun(result);
+        const failedCount = reportMetric(report, "generation_failure_total");
+        setMessage(
+          report.status === "failed"
+            ? `執行失敗：嘗試 ${result.selected_candidate_ids.length} 篇，失敗 ${failedCount} 篇。請查看下方執行明細。`
+            : result.skipped
+              ? "已跳過：目前有另一個執行中的任務。"
+              : `執行完成：嘗試 ${result.selected_candidate_ids.length} 篇，產生 ${result.generated_article_ids.length} 篇草稿。`
+        );
+        await loadReports(token);
+        return;
+      }
+      setMessage("AI 撈文仍在背景執行，請稍後重新整理查看最新報表。");
+    } catch {
+      setMessage("無法連線至 AI 撈文服務，請確認 Backend 狀態後重試。");
+    } finally {
+      setIsRunning(false);
     }
-    const result = (await response.json()) as RunResult;
-    setLastRun(result);
-    setMessage(
-      result.skipped
-        ? "已跳過：目前有另一個執行中的任務。"
-        : `執行完成：選入 ${result.selected_candidate_ids.length} 篇，產生 ${result.generated_article_ids.length} 篇草稿。`
-    );
-    await loadReports();
   }
 
   if (!token) {

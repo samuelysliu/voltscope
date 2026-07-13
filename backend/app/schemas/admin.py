@@ -328,11 +328,11 @@ class AdminDailyContentReportListOut(BaseModel):
     page_size: int
 
 
-class AdminContentPipelineRunOut(BaseModel):
-    report: AdminDailyContentReportOut
-    generated_article_ids: list[str] = Field(default_factory=list)
-    selected_candidate_ids: list[str] = Field(default_factory=list)
-    skipped: bool = False
+class AdminContentPipelineRunAcceptedOut(BaseModel):
+    run_id: str
+    report_date: Date
+    status: Literal["queued", "running"]
+    already_running: bool = False
 
 
 class AdminSourceHealthOut(BaseModel):
