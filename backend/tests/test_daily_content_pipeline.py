@@ -10,7 +10,7 @@ from app.core.config import Settings
 from app.jobs.content_pipeline import is_retryable_pipeline_error, next_generation_candidate, report_counts
 from app.models import ContentCandidate, SourceWhitelist
 from app.schemas.admin import AdminContentPipelineRunPayload
-from app.services.content_pipeline.ai.article_generator import normalize_article_payload
+from app.services.content_pipeline.ai.article_generator import normalize_article_payload, queue_article_generation
 from app.services.content_pipeline.ai.mistral_client import MistralClient
 from app.services.content_pipeline.ai.prompts import article_review_messages, article_revision_messages
 from app.services.content_pipeline.candidates import create_candidate_from_crawl
@@ -179,6 +179,47 @@ async def test_recrawled_transient_failure_returns_to_pending() -> None:
     assert existing.decision == "pending"
     assert existing.rejection_reason is None
     assert existing.fetched_at is not None
+
+
+@pytest.mark.asyncio
+async def test_retrying_interrupted_candidate_clears_stale_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    interrupted_candidate = cast(
+        ContentCandidate,
+        SimpleNamespace(
+            id="candidate-1",
+            decision="failed",
+            rejection_reason="generation_interrupted",
+        ),
+    )
+
+    class QueueSession:
+        def __init__(self) -> None:
+            self.scalar_results = [interrupted_candidate, None]
+            self.added: list[object] = []
+            self.committed = False
+
+        async def scalar(self, statement: object) -> object:
+            return self.scalar_results.pop(0)
+
+        def add(self, value: object) -> None:
+            self.added.append(value)
+
+        async def commit(self) -> None:
+            self.committed = True
+
+        async def refresh(self, value: object) -> None:
+            return None
+
+    monkeypatch.setattr(MistralClient, "is_configured", property(lambda self: True))
+    session = QueueSession()
+
+    job, queued_candidate, created = await queue_article_generation(cast(object, session), interrupted_candidate.id)
+
+    assert created is True
+    assert job.status == "pending"
+    assert queued_candidate.decision == "pending"
+    assert queued_candidate.rejection_reason is None
+    assert session.committed is True
 
 
 @pytest.mark.asyncio

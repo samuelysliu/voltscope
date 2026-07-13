@@ -479,6 +479,8 @@ export function ContentCandidatesManager() {
                       ? "未通過品質檢查"
                       : candidate.rejection_reason === "generation_interrupted"
                         ? "產文因服務重啟而中斷，請重新執行"
+                        : candidate.rejection_reason === "generation_failed"
+                          ? "產生文章失敗，請重新執行"
                         : candidate.rejection_reason}
                   </p>
                 ) : null}

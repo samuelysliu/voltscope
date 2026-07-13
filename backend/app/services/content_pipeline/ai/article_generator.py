@@ -169,6 +169,10 @@ async def queue_article_generation(
     if not MistralClient().is_configured:
         raise AppError("AI_PROVIDER_NOT_CONFIGURED", "Mistral API key is not configured", 503)
 
+    # A retry must not keep presenting the failure reason from an older job.
+    candidate.decision = "pending"
+    candidate.rejection_reason = None
+
     active_job = await session.scalar(
         select(ArticleGenerationJob)
         .where(
@@ -178,6 +182,7 @@ async def queue_article_generation(
         .order_by(ArticleGenerationJob.created_at.desc())
     )
     if active_job is not None:
+        await session.commit()
         return active_job, candidate, False
 
     now = datetime.now(UTC)
@@ -273,6 +278,8 @@ async def generate_article_from_candidate(
             created_at=started,
         )
         session.add(job)
+    candidate.decision = "pending"
+    candidate.rejection_reason = None
     await session.flush()
     await session.commit()
 
@@ -495,11 +502,16 @@ async def generate_article_from_candidate(
         job.status = "failed"
         job.finished_at = datetime.now(UTC)
         job.error_message = exc.message
+        if candidate.rejection_reason != "failed_quality_gate":
+            candidate.decision = "failed"
+            candidate.rejection_reason = "generation_failed"
         await session.commit()
         raise
     except Exception as exc:
         job.status = "failed"
         job.finished_at = datetime.now(UTC)
         job.error_message = str(exc)[:4000]
+        candidate.decision = "failed"
+        candidate.rejection_reason = "generation_failed"
         await session.commit()
         raise
