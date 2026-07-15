@@ -1,7 +1,7 @@
 from datetime import date as Date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 from app.schemas.content import ArticleTranslationIn
 
@@ -17,12 +17,22 @@ class AdminArticlePayload(BaseModel):
     topic_ids: list[str] = Field(default_factory=list)
     translations: list[ArticleTranslationIn] = Field(min_length=1)
 
+    @model_validator(mode="after")
+    def validate_unique_relations(self) -> "AdminArticlePayload":
+        locales = [translation.locale for translation in self.translations]
+        if len(locales) != len(set(locales)):
+            raise ValueError("Each article translation locale must be unique")
+        if len(self.topic_ids) != len(set(self.topic_ids)):
+            raise ValueError("Article topic IDs must be unique")
+        return self
+
 
 class AdminArticleListItem(BaseModel):
     id: str
     status: str
     is_featured: bool
     show_ads: bool
+    created_at: datetime
     updated_at: datetime
     published_at: datetime | None = None
     title: str

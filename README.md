@@ -270,7 +270,10 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm frontend
 查看服務日誌：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml logs -f backend frontend nginx
+sudo docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.prod.yml \
+  logs -f --tail=200 backend
 ```
 
 ## 正式部署

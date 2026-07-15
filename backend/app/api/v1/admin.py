@@ -5,7 +5,8 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, UploadFile
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import Select, delete, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.api.v1.deps import SessionDep, current_admin_user
@@ -73,6 +74,7 @@ from app.schemas.admin import (
     AdminArticlePayload,
     AdminUserUpdate,
 )
+from app.schemas.content import ArticleTranslationIn
 from app.services.ai_ingest import approve_candidate_as_article, run_ai_ingest
 from app.jobs.content_pipeline import run_manual_content_pipeline_background, upsert_report
 from app.services.content_pipeline.ai.article_generator import queue_article_generation, run_queued_article_generation
@@ -112,6 +114,7 @@ async def serialize_article_item(article: Article) -> AdminArticleListItem:
         status=article.status,
         is_featured=article.is_featured,
         show_ads=article.show_ads,
+        created_at=article.created_at,
         updated_at=article.updated_at,
         published_at=article.published_at,
         title=translation.title if translation else "Untitled",
@@ -453,6 +456,8 @@ async def apply_article_payload(article: Article, payload: AdminArticlePayload, 
     if payload.status != "published":
         article.published_at = None if payload.status == "draft" else article.published_at
 
+    await release_deleted_article_slug_conflicts(article.id, payload.translations, session)
+
     existing_translation_rows = (
         await session.execute(select(ArticleTranslation).where(ArticleTranslation.article_id == article.id))
     ).scalars().all()
@@ -485,6 +490,59 @@ async def apply_article_payload(article: Article, payload: AdminArticlePayload, 
         if await session.get(Topic, topic_id) is None:
             raise AppError("TOPIC_NOT_FOUND", "Topic not found", 404)
         session.add(ArticleTopic(article_id=article.id, topic_id=topic_id, is_primary=index == 0))
+
+
+def released_article_slug(slug: str, translation_id: str) -> str:
+    suffix = f"-deleted-{translation_id[:8]}"
+    return f"{slug[: 220 - len(suffix)]}{suffix}"
+
+
+async def release_deleted_article_slug_conflicts(
+    article_id: str,
+    translations: list[ArticleTranslationIn],
+    session: SessionDep,
+) -> None:
+    released_conflict = False
+    for item in translations:
+        row = (
+            await session.execute(
+                select(ArticleTranslation, Article.deleted_at)
+                .join(Article, Article.id == ArticleTranslation.article_id)
+                .where(
+                    ArticleTranslation.locale == item.locale,
+                    ArticleTranslation.slug == item.slug,
+                    ArticleTranslation.article_id != article_id,
+                )
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            continue
+        conflicting_translation, deleted_at = row
+        if deleted_at is None:
+            raise AppError(
+                "ARTICLE_SLUG_CONFLICT",
+                "The article slug is already in use",
+                409,
+                {"locale": item.locale, "slug": item.slug},
+            )
+        conflicting_translation.slug = released_article_slug(
+            conflicting_translation.slug,
+            conflicting_translation.id,
+        )
+        released_conflict = True
+    if released_conflict:
+        await session.flush()
+
+
+async def commit_article_changes(session: SessionDep) -> None:
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        if "article_translations_locale_slug_key" in str(exc):
+            raise AppError("ARTICLE_SLUG_CONFLICT", "The article slug is already in use", 409) from exc
+        raise
 
 
 @router.get("/dashboard")
@@ -981,7 +1039,7 @@ async def admin_content_pipeline_reports(
     page_size: int = Query(20, ge=1, le=100),
 ) -> AdminDailyContentReportListOut:
     stmt = select(DailyContentReport).order_by(DailyContentReport.report_date.desc(), DailyContentReport.updated_at.desc())
-    total = await session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    total = await session.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
     rows = (await session.execute(stmt.offset((page - 1) * page_size).limit(page_size))).scalars().all()
     return AdminDailyContentReportListOut(
         items=[serialize_daily_content_report(row) for row in rows],
@@ -1234,6 +1292,60 @@ async def reject_admin_ai_candidate(candidate_id: str, payload: AdminAiRejectPay
     return {"ok": True}
 
 
+def build_admin_articles_query(
+    q: str | None = None,
+    status: str | None = None,
+    topic: str | None = None,
+    created_from: date | None = None,
+    created_to: date | None = None,
+    is_featured: bool | None = None,
+    show_ads: bool | None = None,
+) -> Select[tuple[Article]]:
+    stmt = (
+        select(Article)
+        .options(selectinload(Article.author), selectinload(Article.translations))
+        .where(Article.deleted_at.is_(None))
+        .order_by(Article.created_at.desc(), Article.id.desc())
+    )
+    if status:
+        stmt = stmt.where(Article.status == status)
+    if is_featured is not None:
+        stmt = stmt.where(Article.is_featured.is_(is_featured))
+    if show_ads is not None:
+        stmt = stmt.where(Article.show_ads.is_(show_ads))
+    keyword = q.strip() if q else ""
+    if keyword:
+        pattern = f"%{keyword}%"
+        stmt = stmt.where(
+            Article.id.in_(
+                select(ArticleTranslation.article_id).where(
+                    or_(
+                        ArticleTranslation.title.ilike(pattern),
+                        ArticleTranslation.slug.ilike(pattern),
+                        ArticleTranslation.excerpt.ilike(pattern),
+                        ArticleTranslation.content_text.ilike(pattern),
+                    )
+                )
+            )
+        )
+    if topic:
+        stmt = stmt.where(
+            Article.id.in_(
+                select(ArticleTopic.article_id)
+                .join(Topic, Topic.id == ArticleTopic.topic_id)
+                .where(Topic.slug == topic)
+            )
+        )
+    local_timezone = ZoneInfo(get_settings().content_pipeline_timezone)
+    if created_from:
+        start_at = datetime.combine(created_from, time.min, tzinfo=local_timezone).astimezone(UTC)
+        stmt = stmt.where(Article.created_at >= start_at)
+    if created_to:
+        exclusive_end = datetime.combine(created_to + timedelta(days=1), time.min, tzinfo=local_timezone).astimezone(UTC)
+        stmt = stmt.where(Article.created_at < exclusive_end)
+    return stmt
+
+
 @router.get("/articles")
 async def admin_articles(
     session: SessionDep,
@@ -1242,38 +1354,34 @@ async def admin_articles(
     q: str | None = None,
     status: str | None = None,
     topic: str | None = None,
+    created_from: date | None = None,
+    created_to: date | None = None,
     is_featured: bool | None = None,
     show_ads: bool | None = None,
 ) -> dict:
-    stmt = (
-        select(Article)
-        .options(selectinload(Article.author), selectinload(Article.translations))
-        .where(Article.deleted_at.is_(None))
-        .order_by(Article.updated_at.desc())
-    )
-    if status:
-        stmt = stmt.where(Article.status == status)
-    if is_featured is not None:
-        stmt = stmt.where(Article.is_featured.is_(is_featured))
-    if show_ads is not None:
-        stmt = stmt.where(Article.show_ads.is_(show_ads))
-    if q:
-        stmt = stmt.join(ArticleTranslation).where(
-            or_(ArticleTranslation.title.ilike(f"%{q}%"), ArticleTranslation.excerpt.ilike(f"%{q}%"))
-        )
-    if topic:
-        stmt = stmt.join(ArticleTopic, ArticleTopic.article_id == Article.id).join(Topic, Topic.id == ArticleTopic.topic_id).where(Topic.slug == topic)
+    if created_from and created_to and created_from > created_to:
+        raise AppError("INVALID_ARTICLE_DATE_RANGE", "created_from must not be after created_to", 422)
+    stmt = build_admin_articles_query(q, status, topic, created_from, created_to, is_featured, show_ads)
     total = await session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     rows = (await session.execute(stmt.offset((page - 1) * page_size).limit(page_size))).scalars().unique().all()
+    topics_by_article: dict[str, list[dict]] = {row.id: [] for row in rows}
+    if rows:
+        topic_rows = (
+            await session.execute(
+                select(ArticleTopic.article_id, Topic.id, Topic.slug, Topic.name_zh, Topic.name_en)
+                .join(Topic, Topic.id == ArticleTopic.topic_id)
+                .where(ArticleTopic.article_id.in_([row.id for row in rows]))
+                .order_by(ArticleTopic.is_primary.desc(), Topic.name_zh)
+            )
+        ).all()
+        for article_id, topic_id, slug, name_zh, name_en in topic_rows:
+            topics_by_article[article_id].append(
+                {"id": topic_id, "slug": slug, "name_zh": name_zh, "name_en": name_en}
+            )
     items = []
     for row in rows:
         item = (await serialize_article_item(row)).model_dump()
-        topics = (
-            await session.execute(
-                select(Topic).join(ArticleTopic, ArticleTopic.topic_id == Topic.id).where(ArticleTopic.article_id == row.id)
-            )
-        ).scalars().all()
-        item["topics"] = [{"id": topic.id, "slug": topic.slug, "name_zh": topic.name_zh, "name_en": topic.name_en} for topic in topics]
+        item["topics"] = topics_by_article[row.id]
         items.append(item)
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
@@ -1325,7 +1433,7 @@ async def create_admin_article(payload: AdminArticlePayload, session: SessionDep
     session.add(article)
     await session.flush()
     await apply_article_payload(article, payload, session, admin)
-    await session.commit()
+    await commit_article_changes(session)
     await session.refresh(article)
     return {"id": article.id, "status": article.status}
 
@@ -1338,15 +1446,21 @@ async def update_admin_article(article_id: str, payload: AdminArticlePayload, se
     if article is None:
         raise AppError("ARTICLE_NOT_FOUND", "Article not found", 404)
     await apply_article_payload(article, payload, session, admin)
-    await session.commit()
+    await commit_article_changes(session)
     return {"id": article.id, "status": article.status}
 
 
 @router.delete("/articles/{article_id}")
 async def delete_admin_article(article_id: str, session: SessionDep) -> dict:
-    article = await session.get(Article, article_id)
+    article = await session.scalar(
+        select(Article)
+        .options(selectinload(Article.translations))
+        .where(Article.id == article_id, Article.deleted_at.is_(None))
+    )
     if article is None:
         raise AppError("ARTICLE_NOT_FOUND", "Article not found", 404)
+    for translation in article.translations:
+        translation.slug = released_article_slug(translation.slug, translation.id)
     article.deleted_at = datetime.now(UTC)
     article.status = "archived"
     await session.commit()
