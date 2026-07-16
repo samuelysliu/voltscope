@@ -8,7 +8,10 @@ steps:
       - voltscope@voltscope
       - --project=project-c02ae071-e5c5-4fc4-9dc
       - --zone=us-west1-b
-      - --command=sudo /opt/voltscope/deploy.sh
+      - >-
+        --command=sudo /opt/voltscope/deploy.sh &&
+        cd /opt/voltscope &&
+        sudo bash /opt/voltscope/infra/scripts/post_deploy.sh
       - --quiet
 
 options:

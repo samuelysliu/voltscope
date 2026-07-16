@@ -296,7 +296,14 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backend ale
 7. 每次部署後執行 `alembic upgrade head`
 8. 重新部署執行 `sudo /opt/voltscope/deploy.sh`
 
-`cloudbuild.yaml` 示範在 push 到 `main` 後，由 Cloud Build 透過 OS Login 連入 Compute Engine，再執行 `/opt/voltscope/deploy.sh`。使用前應將其中的 GCP project、zone、instance 與服務帳號權限改為自己的環境。
+`cloudbuild.yaml` 會在 push 到 `main` 後，由 Cloud Build 透過 OS Login 連入 Compute Engine。VM 上的 `/opt/voltscope/deploy.sh` 負責更新 Git 與容器，接著 Cloud Build 會執行 Git 版的 `infra/scripts/post_deploy.sh`，確保 migration、系統主資料與新聞來源都已同步。使用前應將其中的 GCP project、zone、instance 與服務帳號權限改為自己的環境。
+
+若容器已是最新版本，但正式資料庫尚未出現新分類或新聞來源，可在 VM 手動補跑：
+
+```bash
+cd /opt/voltscope
+sudo bash infra/scripts/post_deploy.sh
+```
 
 ## 備份與維運
 
