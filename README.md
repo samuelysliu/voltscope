@@ -294,6 +294,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backend ale
 5. `/etc/letsencrypt` 已包含正式網域憑證
 6. GCP Firewall 僅開放必要的 22、80、443
 7. 每次部署後執行 `alembic upgrade head`
+8. 重新部署執行 `sudo /opt/voltscope/deploy.sh`
 
 `cloudbuild.yaml` 示範在 push 到 `main` 後，由 Cloud Build 透過 OS Login 連入 Compute Engine，再執行 `/opt/voltscope/deploy.sh`。使用前應將其中的 GCP project、zone、instance 與服務帳號權限改為自己的環境。
 
