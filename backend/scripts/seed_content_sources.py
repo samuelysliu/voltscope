@@ -29,6 +29,8 @@ DEFAULT_SOURCES = [
         "quota_role": "taiwan_daily",
         "allow_auto_publish": False,
         "requires_review": True,
+        "enabled": False,
+        "force_disabled": True,
     },
     {
         "name": "U-CAR EV News",
@@ -168,7 +170,7 @@ DEFAULT_SOURCES = [
     {
         "name": "EVOASIS News",
         "homepage_url": "https://www.evoasis.com.tw",
-        "list_url": "https://www.evoasis.com.tw",
+        "list_url": "https://www.evoasis.com.tw/latestnews/list",
         "rss_url": None,
         "source_group": "charging_operator",
         "region": "taiwan",
@@ -177,6 +179,81 @@ DEFAULT_SOURCES = [
         "allowed_topics": ["charging", "charging-station", "charging-deals"],
         "crawl_method": "html",
         "quota_role": "event_driven",
+        "allow_auto_publish": False,
+        "requires_review": True,
+    },
+    {
+        "name": "U-POWER News",
+        "homepage_url": "https://www.u-power.com.tw",
+        "list_url": "https://www.u-power.com.tw/news.html",
+        "rss_url": None,
+        "source_group": "charging_operator",
+        "region": "taiwan",
+        "default_language": "zh",
+        "trust_level": "high",
+        "allowed_topics": ["charging", "charging-station", "charging-deals"],
+        "crawl_method": "html",
+        "quota_role": "event_driven",
+        "allow_auto_publish": False,
+        "requires_review": True,
+    },
+    {
+        "name": "TAIL News",
+        "homepage_url": "https://www.evtail.com.tw",
+        "list_url": "https://www.evtail.com.tw/posts/list/news",
+        "rss_url": None,
+        "source_group": "charging_operator",
+        "region": "taiwan",
+        "default_language": "zh",
+        "trust_level": "high",
+        "allowed_topics": ["charging", "charging-station", "charging-deals", "energy"],
+        "crawl_method": "html",
+        "quota_role": "event_driven",
+        "allow_auto_publish": False,
+        "requires_review": True,
+    },
+    {
+        "name": "Battway EV News",
+        "homepage_url": "https://www.battway.com.tw",
+        "list_url": "https://www.battway.com.tw/",
+        "rss_url": None,
+        "source_group": "taiwan_media",
+        "region": "taiwan",
+        "default_language": "zh",
+        "trust_level": "medium",
+        "allowed_topics": ["ev", "charging", "charging-station", "charging-deals", "energy"],
+        "crawl_method": "html",
+        "quota_role": "taiwan_daily",
+        "allow_auto_publish": False,
+        "requires_review": True,
+    },
+    {
+        "name": "TechNews Energy",
+        "homepage_url": "https://technews.tw",
+        "list_url": "https://technews.tw/category/%E8%83%BD%E6%BA%90%E7%A7%91%E6%8A%80/",
+        "rss_url": "https://technews.tw/category/%E8%83%BD%E6%BA%90%E7%A7%91%E6%8A%80/feed/",
+        "source_group": "taiwan_media",
+        "region": "taiwan",
+        "default_language": "zh",
+        "trust_level": "medium",
+        "allowed_topics": ["energy", "energy-storage"],
+        "crawl_method": "rss",
+        "quota_role": "taiwan_daily",
+        "allow_auto_publish": False,
+        "requires_review": True,
+    },
+    {
+        "name": "TechNews Energy Storage",
+        "homepage_url": "https://technews.tw",
+        "list_url": "https://technews.tw/category/%E8%83%BD%E6%BA%90%E7%A7%91%E6%8A%80/%E9%9B%BB%E5%8A%9B%E5%84%B2%E5%AD%98/",
+        "rss_url": "https://technews.tw/category/%E8%83%BD%E6%BA%90%E7%A7%91%E6%8A%80/%E9%9B%BB%E5%8A%9B%E5%84%B2%E5%AD%98/feed/",
+        "source_group": "taiwan_media",
+        "region": "taiwan",
+        "default_language": "zh",
+        "trust_level": "medium",
+        "allowed_topics": ["energy-storage", "energy", "battery"],
+        "crawl_method": "rss",
+        "quota_role": "taiwan_daily",
         "allow_auto_publish": False,
         "requires_review": True,
     },
@@ -193,7 +270,8 @@ async def main() -> None:
                     SourceWhitelist.name == item["name"],
                 )
             )
-            if source is None:
+            is_new = source is None
+            if is_new:
                 source = SourceWhitelist(
                     name=item["name"],
                     homepage_url=item["homepage_url"],
@@ -202,6 +280,7 @@ async def main() -> None:
                     region=item["region"],
                     created_at=datetime.now(UTC),
                     updated_at=datetime.now(UTC),
+                    enabled=item.get("enabled", True),
                 )
                 session.add(source)
                 await session.flush()
@@ -209,13 +288,19 @@ async def main() -> None:
             source.rss_url = item["rss_url"]
             source.default_language = item["default_language"]
             source.trust_level = item["trust_level"]
-            source.enabled = True
+            if item.get("force_disabled"):
+                source.enabled = False
             source.allowed_topics = item["allowed_topics"]
             source.crawl_method = item["crawl_method"]
             source.quota_role = item["quota_role"]
             source.allow_auto_publish = item["allow_auto_publish"]
             source.requires_review = item["requires_review"]
-            source.health_status = "healthy"
+            if is_new:
+                source.health_status = "healthy" if source.enabled else "disabled"
+            elif not source.enabled:
+                source.health_status = "disabled"
+            elif source.health_status == "disabled":
+                source.health_status = "healthy"
 
             version = await session.scalar(
                 select(SourceParserVersion).where(SourceParserVersion.source_id == source.id, SourceParserVersion.version == 1)
@@ -235,10 +320,11 @@ async def main() -> None:
                 "homepage_url": item["homepage_url"],
             }
             version.sample_url = item["rss_url"] or item["list_url"] or item["homepage_url"]
-            version.confidence_score = 1.0 if item["rss_url"] else 0.5
-            version.validation_status = "approved" if item["rss_url"] else "draft"
-            version.is_active = bool(item["rss_url"])
-            version.approved_at = datetime.now(UTC) if item["rss_url"] else None
+            version.confidence_score = 1.0 if item["rss_url"] else 0.8
+            version.validation_status = "approved" if source.enabled else "retired"
+            version.is_active = source.enabled
+            version.approved_at = datetime.now(UTC) if source.enabled else None
+            version.retired_at = None if source.enabled else datetime.now(UTC)
 
         await session.commit()
 

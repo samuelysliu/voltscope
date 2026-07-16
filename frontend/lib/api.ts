@@ -112,7 +112,9 @@ const fallbackTopics: Topic[] = [
   { id: "charging", slug: "charging", name_zh: "充電", name_en: "Charging" },
   { id: "charging-station", slug: "charging-station", name_zh: "充電樁", name_en: "Charging Stations" },
   { id: "charging-deals", slug: "charging-deals", name_zh: "充電優惠", name_en: "Charging Deals" },
-  { id: "smart-mobility", slug: "smart-mobility", name_zh: "智慧移動", name_en: "Smart Mobility" }
+  { id: "smart-mobility", slug: "smart-mobility", name_zh: "智慧移動", name_en: "Smart Mobility" },
+  { id: "energy", slug: "energy", name_zh: "能源", name_en: "Energy" },
+  { id: "energy-storage", slug: "energy-storage", name_zh: "儲能", name_en: "Energy Storage" }
 ];
 
 const fallbackImage = "https://images.unsplash.com/photo-1593941707882-a5bba14938c7?auto=format&fit=crop&w=1400&q=80";

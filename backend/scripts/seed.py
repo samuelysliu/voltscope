@@ -46,6 +46,8 @@ async def main() -> None:
             ("charging-station", "充電樁", "Charging Stations"),
             ("charging-deals", "充電優惠", "Charging Deals"),
             ("smart-mobility", "智慧移動", "Smart Mobility"),
+            ("energy", "能源", "Energy"),
+            ("energy-storage", "儲能", "Energy Storage"),
         ]
         topics: list[Topic] = []
         for slug, zh, en in default_topics:
