@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     mistral_prompt_version: str = "content-pipeline-v4"
 
     content_pipeline_min_zh_chars: int = 600
-    content_pipeline_min_en_words: int = 400
+    content_pipeline_min_en_words: int = 200
     content_pipeline_max_source_sentence_overlap: float = 0.35
 
     @model_validator(mode="after")

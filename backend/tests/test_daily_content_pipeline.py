@@ -1,18 +1,23 @@
 from types import SimpleNamespace
 from typing import cast
 
-from fastapi import BackgroundTasks
 import pytest
+from fastapi import BackgroundTasks
 
 import app.api.v1.admin as admin_api
-from app.core.errors import AppError
 from app.core.config import Settings
+from app.core.errors import AppError
 from app.jobs.content_pipeline import is_retryable_pipeline_error, next_generation_candidate, report_counts
 from app.models import ContentCandidate, SourceWhitelist
 from app.schemas.admin import AdminContentPipelineRunPayload
 from app.services.content_pipeline.ai.article_generator import normalize_article_payload, queue_article_generation
 from app.services.content_pipeline.ai.mistral_client import MistralClient
-from app.services.content_pipeline.ai.prompts import article_review_messages, article_revision_messages
+from app.services.content_pipeline.ai.prompts import (
+    article_length_requirement,
+    article_review_messages,
+    article_translation_messages,
+    article_translation_revision_messages,
+)
 from app.services.content_pipeline.candidates import create_candidate_from_crawl
 from app.services.content_pipeline.crawlers.base import CrawledCandidate
 from app.services.content_pipeline.quality_gates import count_en_words, sentence_overlap_ratio
@@ -26,8 +31,9 @@ def test_daily_pipeline_defaults_target_five_successes() -> None:
     assert Settings.model_fields["content_pipeline_daily_min_articles"].default == 5
 
 
-def test_english_article_minimum_is_four_hundred_words() -> None:
-    assert Settings.model_fields["content_pipeline_min_en_words"].default == 400
+def test_english_article_minimum_is_two_hundred_words() -> None:
+    assert Settings.model_fields["content_pipeline_min_en_words"].default == 200
+    assert article_length_requirement("en") == (200, "at least 230 English words")
 
 
 def test_failed_quota_candidate_is_replaced_by_same_category() -> None:
@@ -116,25 +122,44 @@ def test_normalized_article_counts_the_sanitized_html_body() -> None:
     assert count_en_words(payload["text"]) == 410
 
 
-def test_english_revision_prompt_receives_measured_length_and_buffered_target() -> None:
+def test_english_translation_uses_finalized_chinese_master() -> None:
     item = cast(
         ContentCandidate,
         SimpleNamespace(source_url="https://example.com/story"),
     )
+    zh_article = {"title": "中文定稿", "html": "<p>完整中文內容</p>", "text": "完整中文內容"}
 
-    messages = article_revision_messages(
+    messages = article_translation_messages(
         item,
         {"verified_facts": ["fact one", "fact two", "fact three"]},
-        "en",
+        zh_article,
+    )
+
+    instruction = messages[0]["content"] + messages[1]["content"]
+    assert "Chinese article is the master copy" in instruction
+    assert "Do not independently regenerate" in instruction
+    assert "中文定稿" in instruction
+    assert "publication gate is 200 English words" in instruction
+    assert "at least 230 English words" in instruction
+
+
+def test_short_english_translation_revision_restores_chinese_details() -> None:
+    item = cast(ContentCandidate, SimpleNamespace(source_url="https://example.com/story"))
+
+    messages = article_translation_revision_messages(
+        item,
+        {"verified_facts": ["fact one", "fact two", "fact three"]},
+        {"title": "中文定稿", "html": "<p>完整中文內容</p>"},
         {"title": "Draft", "html": "<p>Draft</p>", "text": "Draft"},
         ["en_article_short"],
-        {"en_words": 327},
+        {"en_words": 187},
     )
 
     instruction = messages[1]["content"]
-    assert "current article has 327 English words" in instruction
-    assert "publication minimum is 400" in instruction
-    assert "at least 450 English words" in instruction
+    assert "has 187 English words" in instruction
+    assert "publication gate is 200" in instruction
+    assert "at least 230 English words" in instruction
+    assert "中文定稿" in instruction
 
 
 def test_dns_failure_is_retryable_but_quality_failure_is_not() -> None:

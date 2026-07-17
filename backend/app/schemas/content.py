@@ -39,12 +39,12 @@ class ArticleTranslationIn(BaseModel):
     slug: str = Field(min_length=1, max_length=220, pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     excerpt: str = Field(min_length=1)
     content_json: dict[str, Any] = Field(default_factory=dict)
-    content_html: str
-    content_text: str
-    seo_title: str | None = None
-    seo_description: str | None = None
-    og_title: str | None = None
-    og_description: str | None = None
+    content_html: str = Field(min_length=1)
+    content_text: str = Field(min_length=1)
+    seo_title: str | None = Field(default=None, max_length=255)
+    seo_description: str | None = Field(default=None, max_length=320)
+    og_title: str | None = Field(default=None, max_length=255)
+    og_description: str | None = Field(default=None, max_length=320)
     translation_status: str = "draft"
 
 

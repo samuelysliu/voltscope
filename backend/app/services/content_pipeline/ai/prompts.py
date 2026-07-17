@@ -11,7 +11,7 @@ def article_length_requirement(locale: str) -> tuple[int, str]:
         target = max(minimum + 50, 650)
         return minimum, f"at least {target} CJK characters"
     minimum = settings.content_pipeline_min_en_words
-    target = max(minimum + 50, 450)
+    target = max(minimum + 30, int(minimum * 1.15))
     return minimum, f"at least {target} English words"
 
 
@@ -79,7 +79,9 @@ def article_generation_messages(
                 "For Traditional Chinese, use natural Taiwan news language and translate the semantic meaning of the headline. "
                 "Company and product names may remain in English, but an English headline followed by a generic Chinese suffix is invalid. "
                 "For example, the headline 'Ford Recalls 43,000 Mustang Mach-E EVs Over Diffs That May Go Bang' should become "
-                "'Ford \u53ec\u56de 4.3 \u842c\u8f1b Mustang Mach-E\uff0c\u5dee\u901f\u5668\u7570\u5e38\u6050\u767c\u51fa\u7206\u88c2\u8072', not the English title plus Chinese filler."
+                "'Ford \u53ec\u56de 4.3 \u842c\u8f1b Mustang Mach-E\uff0c"
+                "\u5dee\u901f\u5668\u7570\u5e38\u6050\u767c\u51fa\u7206\u88c2\u8072', not the English title plus "
+                "Chinese filler."
             ),
         },
         {
@@ -90,9 +92,11 @@ def article_generation_messages(
                 f"The article body in both html and text must contain {length_requirement}; the publication gate is {minimum} {unit}. "
                 "Count the article body before responding and aim above the gate, but never invent facts to reach length. "
                 "Open with the most newsworthy verified event and its concrete scale or consequence. Follow with evidence, "
-                "chronology, technical or regulatory context explicitly present in the notes, affected stakeholders, and the official response. "
+                "chronology, technical or regulatory context explicitly present in the notes, affected stakeholders, and the "
+                "official response. "
                 "Use descriptive h2 headings only when they improve a long article; never use generic headings such as Report Highlights, "
-                "Industry Context, Taiwan Relevance, or What to Watch. Omit Taiwan entirely unless the factual notes establish a direct connection. "
+                "Industry Context, Taiwan Relevance, or What to Watch. Omit Taiwan entirely unless the factual notes establish "
+                "a direct connection. "
                 "Do not mention drafts, editors, verification before publication, missing information, or the writing process. "
                 "The excerpt must state the event and its most important consequence in one or two specific sentences.\n\n"
                 f"Candidate and source material:\n{candidate_context(candidate, source_material)}\n\n"
@@ -136,6 +140,70 @@ def article_revision_messages(
                 f"Failed checks: {json.dumps(issue_codes)}\n\n"
                 f"Factual record: {json.dumps(factual_notes, ensure_ascii=False)}\n\n"
                 f"Draft to rewrite: {json.dumps(draft, ensure_ascii=False)}"
+            ),
+        },
+    ]
+
+
+def article_translation_messages(
+    candidate: ContentCandidate,
+    factual_notes: dict,
+    zh_article: dict,
+) -> list[dict[str, str]]:
+    minimum, length_requirement = article_length_requirement("en")
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a professional news translator for VoltScope. Translate the finalized Traditional Chinese article "
+                "into natural English. The Chinese article is the master copy: preserve every supported fact, number, date, "
+                "attribution, qualification, paragraph, and sequence. Do not independently regenerate the story from the source, "
+                "add analysis, omit details, or summarize the article. Return strict JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Translate the complete Chinese master into English. Return all keys: title, slug, excerpt, html, text, "
+                "seo_title, seo_description. Preserve the article structure with p, h2, and a tags and retain the exact source "
+                f"URL {candidate.source_url}. The English body must contain {length_requirement}; the publication gate is "
+                f"{minimum} English words. Translate every substantive Chinese paragraph instead of shortening it. The factual "
+                "record is supplied only to prevent translation errors, not as permission to independently rewrite the report.\n\n"
+                f"Factual record: {json.dumps(factual_notes, ensure_ascii=False)}\n\n"
+                f"Finalized Chinese master: {json.dumps(zh_article, ensure_ascii=False)}"
+            ),
+        },
+    ]
+
+
+def article_translation_revision_messages(
+    candidate: ContentCandidate,
+    factual_notes: dict,
+    zh_article: dict,
+    en_article: dict,
+    issue_codes: list[str],
+    quality_metrics: dict | None = None,
+) -> list[dict[str, str]]:
+    minimum, length_requirement = article_length_requirement("en")
+    current_length = (quality_metrics or {}).get("en_words", "unknown")
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You correct an English translation against its finalized Traditional Chinese master. Return strict JSON only. "
+                "Restore every omitted fact and paragraph from the Chinese article without adding unsupported information."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "Return all keys: title, slug, excerpt, html, text, seo_title, seo_description. The current English translation "
+                f"has {current_length} English words and failed {json.dumps(issue_codes)}. Produce {length_requirement}; the "
+                f"publication gate is {minimum}. Preserve p, h2, and a tags and the exact source URL {candidate.source_url}. "
+                "Translate every substantive paragraph in the Chinese master and do not independently regenerate or summarize it.\n\n"
+                f"Factual record: {json.dumps(factual_notes, ensure_ascii=False)}\n\n"
+                f"Finalized Chinese master: {json.dumps(zh_article, ensure_ascii=False)}\n\n"
+                f"English translation to correct: {json.dumps(en_article, ensure_ascii=False)}"
             ),
         },
     ]

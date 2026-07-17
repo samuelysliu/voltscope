@@ -1,4 +1,5 @@
-from datetime import date as Date, datetime
+from datetime import date as Date
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, HttpUrl, model_validator
@@ -11,9 +12,9 @@ class AdminArticlePayload(BaseModel):
     status: Literal["draft", "published", "archived"] = "draft"
     is_featured: bool = False
     show_ads: bool = True
-    hero_image_url: str | None = None
-    thumbnail_url: str | None = None
-    og_image_url: str | None = None
+    hero_image_url: str | None = Field(default=None, max_length=1000)
+    thumbnail_url: str | None = Field(default=None, max_length=1000)
+    og_image_url: str | None = Field(default=None, max_length=1000)
     topic_ids: list[str] = Field(default_factory=list)
     translations: list[ArticleTranslationIn] = Field(min_length=1)
 

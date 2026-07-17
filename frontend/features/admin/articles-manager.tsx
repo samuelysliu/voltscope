@@ -71,10 +71,11 @@ type ArticleFilters = {
   created_to: string;
 };
 type ApiErrorPayload = {
+  detail?: Array<{ msg?: string; loc?: Array<string | number> }>;
   error?: {
     code?: string;
     message?: string;
-    details?: { locale?: string; slug?: string };
+    details?: { locale?: string; slug?: string } | Array<{ msg?: string; loc?: Array<string | number> }>;
   };
 };
 
@@ -321,17 +322,25 @@ export function ArticlesManager({ initialArticleId, openNewInitially = false }: 
   async function saveArticle(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!token || isSaving) return;
-    const incompleteTranslation = translations.find(
-      (item) => !item.title.trim() || !item.slug.trim() || !item.excerpt.trim() || !htmlToText(item.content_html)
+    const startedTranslations = translations.filter(
+      (item) => item.title.trim() || item.excerpt.trim() || htmlToText(item.content_html)
+    );
+    const incompleteTranslation = startedTranslations.find(
+      (item) => !item.title.trim() || !item.excerpt.trim() || !htmlToText(item.content_html)
     );
     if (incompleteTranslation) {
       setActiveLocale(incompleteTranslation.locale as "zh-TW" | "en");
       setEditorError(`${incompleteTranslation.locale === "zh-TW" ? "中文" : "英文"}內容尚未填寫完整。`);
       return;
     }
+    if (!startedTranslations.length) {
+      setEditorError("請至少填寫一種語言的文章內容。");
+      return;
+    }
 
     setIsSaving(true);
     setEditorError("");
+    const fallbackSlug = `article-${Date.now().toString(36)}`;
     const payload = {
       author_id: authorId || null,
       status,
@@ -341,9 +350,9 @@ export function ArticlesManager({ initialArticleId, openNewInitially = false }: 
       thumbnail_url: heroImageUrl || null,
       og_image_url: heroImageUrl || null,
       topic_ids: topicIds,
-      translations: translations.map((item) => ({
+      translations: startedTranslations.map((item) => ({
         ...item,
-        slug: item.slug || slugify(item.title),
+        slug: item.slug || slugify(item.title) || fallbackSlug,
         content_text: htmlToText(item.content_html),
         translation_status: status === "published" ? "published" : item.translation_status || "draft"
       }))
@@ -357,10 +366,13 @@ export function ArticlesManager({ initialArticleId, openNewInitially = false }: 
       if (handleUnauthorized(response)) return;
       if (!response.ok) {
         const error = (await response.json().catch(() => ({}))) as ApiErrorPayload;
+        const validationDetail = error.detail?.find((item) => item.msg)?.msg
+          || (Array.isArray(error.error?.details) ? error.error.details.find((item) => item.msg)?.msg : undefined);
+        const errorDetails = !Array.isArray(error.error?.details) ? error.error?.details : undefined;
         setEditorError(
           error.error?.code === "ARTICLE_SLUG_CONFLICT"
-            ? `Slug「${error.error.details?.slug || "目前輸入值"}」已被其他文章使用，請更換後再儲存。`
-            : "儲存文章失敗，請確認欄位完整後再試。"
+            ? `Slug「${errorDetails?.slug || "目前輸入值"}」已被其他文章使用，請更換後再儲存。`
+            : validationDetail || error.error?.message || "儲存文章失敗，請確認欄位完整後再試。"
         );
         return;
       }

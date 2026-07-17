@@ -107,6 +107,13 @@ async def get_default_author(session: SessionDep) -> Author:
     return author
 
 
+async def resolve_article_author(session: SessionDep, author_id: str | None) -> Author:
+    author = await session.get(Author, author_id) if author_id else await get_default_author(session)
+    if author is None:
+        raise AppError("AUTHOR_NOT_FOUND", "Author not found", 404)
+    return author
+
+
 async def serialize_article_item(article: Article) -> AdminArticleListItem:
     translation = next((item for item in article.translations if item.locale == "zh-TW"), None) or next(iter(article.translations), None)
     return AdminArticleListItem(
@@ -438,9 +445,7 @@ async def serialize_ai_job(job: AiIngestJob, session: SessionDep, include_candid
 
 
 async def apply_article_payload(article: Article, payload: AdminArticlePayload, session: SessionDep, admin: User) -> None:
-    author = await session.get(Author, payload.author_id) if payload.author_id else await get_default_author(session)
-    if author is None:
-        raise AppError("AUTHOR_NOT_FOUND", "Author not found", 404)
+    author = await resolve_article_author(session, payload.author_id)
     was_published = article.status == "published"
     article.author_id = author.id
     article.status = payload.status
@@ -1428,7 +1433,7 @@ async def admin_article_detail(article_id: str, session: SessionDep) -> dict:
 
 @router.post("/articles", status_code=201)
 async def create_admin_article(payload: AdminArticlePayload, session: SessionDep, admin: User = Depends(current_admin_user)) -> dict:
-    author = await session.get(Author, payload.author_id) if payload.author_id else await get_default_author(session)
+    author = await resolve_article_author(session, payload.author_id)
     article = Article(author_id=author.id, created_by=admin.id, updated_by=admin.id)
     session.add(article)
     await session.flush()

@@ -1,12 +1,12 @@
+import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from html import unescape
-import logging
-import re
 
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
 from app.core.errors import AppError
@@ -21,18 +21,19 @@ from app.models import (
     SourceWhitelist,
     User,
 )
+from app.services.article_classification import classify_generated_article
 from app.services.content_pipeline.ai.mistral_client import MistralClient, MistralJsonResult
 from app.services.content_pipeline.ai.prompts import (
     article_generation_messages,
     article_review_messages,
     article_revision_messages,
+    article_translation_messages,
+    article_translation_revision_messages,
     factual_notes_messages,
 )
 from app.services.content_pipeline.quality_gates import run_quality_gates
 from app.services.content_pipeline.source_material import fetch_candidate_source_material
-from app.services.article_classification import classify_generated_article
 from app.services.sanitize import sanitize_html
-
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,9 @@ async def unique_slug(session: AsyncSession, base: str, locale: str) -> str:
     candidate = slugify(base)
     for index in range(50):
         slug = candidate if index == 0 else f"{candidate}-{index + 1}"
-        exists = await session.scalar(select(ArticleTranslation.id).where(ArticleTranslation.locale == locale, ArticleTranslation.slug == slug))
+        exists = await session.scalar(
+            select(ArticleTranslation.id).where(ArticleTranslation.locale == locale, ArticleTranslation.slug == slug)
+        )
         if exists is None:
             return slug
     return f"{candidate}-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
@@ -312,15 +315,6 @@ async def generate_article_from_candidate(
                 article_generation_messages(candidate, notes, "zh-TW", source_material),
             )
         )
-        en_payload = normalize_article_payload(
-            await generate_json(
-                session,
-                job,
-                client,
-                "en_generation",
-                article_generation_messages(candidate, notes, "en", source_material),
-            )
-        )
         zh_payload = normalize_article_payload(
             await generate_json(
                 session,
@@ -334,9 +328,9 @@ async def generate_article_from_candidate(
             await generate_json(
                 session,
                 job,
-                review_client,
-                "en_editor_review",
-                article_review_messages(candidate, notes, "en", en_payload),
+                client,
+                "en_translation_generation",
+                article_translation_messages(candidate, notes, zh_payload),
             )
         )
         shared_revision_codes = {
@@ -375,18 +369,27 @@ async def generate_article_from_candidate(
                         ),
                     )
                 )
-            if issue_codes.intersection(en_revision_codes):
+                en_payload = normalize_article_payload(
+                    await generate_json(
+                        session,
+                        job,
+                        client,
+                        "en_retranslation_generation",
+                        article_translation_messages(candidate, notes, zh_payload),
+                    )
+                )
+            elif issue_codes.intersection(en_revision_codes):
                 revision_requested = True
                 en_payload = normalize_article_payload(
                     await generate_json(
                         session,
                         job,
                         client,
-                        "en_revision",
-                        article_revision_messages(
+                        "en_translation_revision",
+                        article_translation_revision_messages(
                             candidate,
                             notes,
-                            "en",
+                            zh_payload,
                             en_payload,
                             sorted(issue_codes.intersection(en_revision_codes)),
                             gate.get("metrics"),

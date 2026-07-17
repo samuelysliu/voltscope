@@ -8,6 +8,7 @@ from sqlalchemy.dialects import postgresql
 from app.api.v1.admin import (
     admin_articles,
     build_admin_articles_query,
+    create_admin_article,
     release_deleted_article_slug_conflicts,
     released_article_slug,
 )
@@ -94,6 +95,31 @@ def test_admin_article_payload_rejects_duplicate_locales_and_topics() -> None:
         article_payload(translations=[article_payload().translations[0], duplicate_translation])
     with pytest.raises(ValueError):
         article_payload(topic_ids=["topic-1", "topic-1"])
+
+
+def test_admin_article_payload_rejects_database_overflow_fields() -> None:
+    translation = article_payload().translations[0].model_dump()
+    translation["seo_description"] = "x" * 321
+
+    with pytest.raises(ValueError):
+        article_payload(translations=[translation])
+    with pytest.raises(ValueError):
+        article_payload(hero_image_url="https://example.com/" + "x" * 1000)
+
+
+@pytest.mark.asyncio
+async def test_create_article_returns_not_found_for_stale_author() -> None:
+    class MissingAuthorSession:
+        async def get(self, model: object, item_id: str) -> None:
+            return None
+
+    payload = article_payload(author_id="missing-author")
+
+    with pytest.raises(AppError) as error:
+        await create_admin_article(payload, MissingAuthorSession(), type("Admin", (), {"id": "admin-1"})())
+
+    assert error.value.code == "AUTHOR_NOT_FOUND"
+    assert error.value.status_code == 404
 
 
 def test_released_article_slug_is_unique_and_stays_within_database_limit() -> None:
