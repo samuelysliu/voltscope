@@ -223,10 +223,10 @@ async def run_queued_article_generation(job_id: str, candidate_id: str, admin_id
 async def recover_interrupted_generation_jobs() -> int:
     async with AsyncSessionLocal() as session:
         jobs = (
-            await session.execute(
-                select(ArticleGenerationJob).where(ArticleGenerationJob.status.in_(("pending", "running")))
-            )
-        ).scalars().all()
+            (await session.execute(select(ArticleGenerationJob).where(ArticleGenerationJob.status.in_(("pending", "running")))))
+            .scalars()
+            .all()
+        )
         if not jobs:
             return 0
         now = datetime.now(UTC)
@@ -336,6 +336,7 @@ async def generate_article_from_candidate(
         shared_revision_codes = {
             "generic_article_template_detected",
             "missing_source_attribution",
+            "source_link_call_to_action_detected",
             "source_sentence_overlap_too_high",
         }
         zh_revision_codes = {

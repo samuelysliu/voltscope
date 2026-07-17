@@ -20,7 +20,7 @@ from app.services.content_pipeline.ai.prompts import (
 )
 from app.services.content_pipeline.candidates import create_candidate_from_crawl
 from app.services.content_pipeline.crawlers.base import CrawledCandidate
-from app.services.content_pipeline.quality_gates import count_en_words, sentence_overlap_ratio
+from app.services.content_pipeline.quality_gates import count_en_words, sentence_overlap_ratio, source_link_cta_matches
 
 
 def candidate(candidate_id: str, category: str) -> ContentCandidate:
@@ -98,6 +98,13 @@ def test_editor_agent_receives_writer_draft_and_source_url() -> None:
     assert "independent senior news editor" in messages[0]["content"]
     assert "Writer draft" in messages[1]["content"]
     assert "https://example.com/story" in messages[1]["content"]
+    assert "must not tell readers to consult another page for more content" in messages[1]["content"]
+
+
+def test_source_link_cta_gate_blocks_read_more_phrases_but_allows_attribution() -> None:
+    assert source_link_cta_matches("更多內容請參考原始報導") == ["更多內容請參考"]
+    assert source_link_cta_matches("For more details, see the original report.") == ["for more details, see"]
+    assert source_link_cta_matches("根據<a href='https://example.com/story'>交通部</a>公布的資料，充電站數量增加。") == []
 
 
 def test_reviewer_can_use_a_separate_model() -> None:
