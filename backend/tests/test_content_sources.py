@@ -5,7 +5,9 @@ import pytest
 
 from app.models import SourceWhitelist
 from app.services.article_classification import TOPIC_RULES, score_rules
+from app.services.content_pipeline import source_crawler
 from app.services.content_pipeline.crawlers import crawler_fallback
+from app.services.content_pipeline.crawlers.base import CrawledCandidate, CrawlResult
 from app.services.content_pipeline.parsers.html_parser import parse_evoasis_candidates, parse_html_candidates
 from app.services.content_pipeline.parsers.rss_parser import parse_rss_candidates
 from app.services.content_pipeline.source_material import MIN_SOURCE_MATERIAL_CHARS, extract_article_text
@@ -88,6 +90,67 @@ async def test_evoasis_crawler_uses_structured_parser(monkeypatch: pytest.Monkey
 
     assert result.fallback_used["status"] == "success"
     assert [candidate.title for candidate in result.candidates] == ["全新高速充電站正式啟用"]
+
+
+@pytest.mark.asyncio
+async def test_manual_candidate_limit_overrides_source_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    configured_source = source(
+        id="source-1",
+        enabled=True,
+        crawl_method="rss",
+        max_candidates_per_run=10,
+        last_success_at=None,
+        consecutive_failures=0,
+        health_status="healthy",
+    )
+    crawled = [CrawledCandidate(source_url=f"https://evoasis.com.tw/news/{index}", title=f"Article {index}") for index in range(5)]
+
+    class Session:
+        async def get(self, model: object, item_id: str) -> SourceWhitelist:
+            assert item_id == "source-1"
+            return configured_source
+
+        def add(self, value: object) -> None:
+            return None
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+        async def refresh(self, value: object) -> None:
+            return None
+
+    async def fake_run_method(method: str, selected_source: SourceWhitelist, candidate_limit: int) -> CrawlResult:
+        assert method == "rss"
+        assert selected_source is configured_source
+        assert candidate_limit == 3
+        return CrawlResult(candidates=crawled, fallback_used={"method": "rss", "status": "success"})
+
+    monkeypatch.setattr(source_crawler, "_run_method", fake_run_method)
+
+    result = await source_crawler.test_crawl_source(cast(object, Session()), "source-1", candidate_limit=3)
+
+    assert len(result.candidates) == 3
+    assert result.run.candidates_found == 3
+
+
+@pytest.mark.asyncio
+async def test_html_crawler_applies_explicit_candidate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw_html = "".join(f'<a href="/latestnews/article-{index}">充電服務最新消息第 {index} 篇</a>' for index in range(5))
+
+    async def fake_fetch_text(url: str) -> tuple[str, str]:
+        return raw_html, url
+
+    monkeypatch.setattr(crawler_fallback, "fetch_text", fake_fetch_text)
+
+    result = await crawler_fallback.crawl_static_html(
+        source(domain="example.com", list_url="https://example.com/news", homepage_url="https://example.com"),
+        candidate_limit=2,
+    )
+
+    assert len(result.candidates) == 2
 
 
 @pytest.mark.parametrize(

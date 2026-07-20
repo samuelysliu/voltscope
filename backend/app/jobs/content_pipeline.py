@@ -1,8 +1,8 @@
 import asyncio
+import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
-import logging
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -126,6 +126,16 @@ def report_counts(candidates: list[ContentCandidate], generated_articles: list[A
     }
 
 
+def limit_generation_candidates(
+    candidates: list[ContentCandidate],
+    generation_target: int,
+    manual_run: bool,
+) -> list[ContentCandidate]:
+    if not manual_run:
+        return candidates
+    return candidates[:generation_target]
+
+
 def next_generation_candidate(
     candidates: list[ContentCandidate],
     attempted_ids: set[str],
@@ -137,9 +147,7 @@ def next_generation_candidate(
     if not remaining:
         return None
     taiwan_successes = len([candidate for candidate in successful_candidates if candidate.quota_category == "taiwan_media"])
-    international_successes = len(
-        [candidate for candidate in successful_candidates if candidate.quota_category == "international_media"]
-    )
+    international_successes = len([candidate for candidate in successful_candidates if candidate.quota_category == "international_media"])
     preferred_category = None
     if taiwan_successes < taiwan_min:
         preferred_category = "taiwan_media"
@@ -155,20 +163,26 @@ def next_generation_candidate(
 async def run_scheduled_publish(session: AsyncSession) -> int:
     now = datetime.now(UTC)
     rows = (
-        await session.execute(
-            select(Article).where(
-                Article.status == "draft",
-                Article.scheduled_at.is_not(None),
-                Article.scheduled_at <= now,
-                Article.deleted_at.is_(None),
+        (
+            await session.execute(
+                select(Article).where(
+                    Article.status == "draft",
+                    Article.scheduled_at.is_not(None),
+                    Article.scheduled_at <= now,
+                    Article.deleted_at.is_(None),
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     for article in rows:
         article.status = "published"
         article.published_at = article.published_at or now
         article.first_published_at = article.first_published_at or article.published_at
-        translations = (await session.execute(select(ArticleTranslation).where(ArticleTranslation.article_id == article.id))).scalars().all()
+        translations = (
+            (await session.execute(select(ArticleTranslation).where(ArticleTranslation.article_id == article.id))).scalars().all()
+        )
         for translation in translations:
             translation.translation_status = "published"
     return len(rows)
@@ -179,6 +193,8 @@ async def run_daily_content_pipeline(
     report_date: date | None = None,
     force: bool = False,
     dry_run: bool = False,
+    source_id: str | None = None,
+    article_count: int | None = None,
 ) -> PipelineRunResult:
     settings = get_settings()
     if not dry_run and not settings.mistral_api_key.strip():
@@ -205,11 +221,11 @@ async def run_daily_content_pipeline(
             acquired = True
 
         await run_scheduled_publish(session)
-        sources = (
-            await session.execute(
-                select(SourceWhitelist).where(SourceWhitelist.enabled.is_(True)).order_by(SourceWhitelist.quota_role.asc(), SourceWhitelist.updated_at.desc())
-            )
-        ).scalars().all()
+        source_stmt = select(SourceWhitelist).where(SourceWhitelist.enabled.is_(True))
+        if source_id:
+            source_stmt = source_stmt.where(SourceWhitelist.id == source_id)
+        source_stmt = source_stmt.order_by(SourceWhitelist.quota_role.asc(), SourceWhitelist.updated_at.desc())
+        sources = (await session.execute(source_stmt)).scalars().all()
         if not sources:
             report = await upsert_report(
                 session,
@@ -226,10 +242,22 @@ async def run_daily_content_pipeline(
 
         failed_sources: list[dict] = []
         degraded_sources: list[dict] = []
+        crawled_candidate_total = 0
+        remaining_crawl_target = article_count
 
         for source in sources:
+            if remaining_crawl_target is not None and remaining_crawl_target <= 0:
+                break
             try:
-                await crawl_source_to_candidates(session, source.id)
+                crawl_result = await crawl_source_to_candidates(
+                    session,
+                    source.id,
+                    candidate_limit=remaining_crawl_target,
+                )
+                crawled_count = len(crawl_result.created) + crawl_result.duplicates
+                crawled_candidate_total += crawled_count
+                if remaining_crawl_target is not None:
+                    remaining_crawl_target -= crawled_count
             except Exception as exc:
                 failed_sources.append({"id": source.id, "name": source.name, "error": str(exc)[:500]})
 
@@ -237,7 +265,11 @@ async def run_daily_content_pipeline(
             session,
             settings.content_pipeline_daily_taiwan_media_min,
             settings.content_pipeline_daily_international_min,
+            source_id=source_id,
         )
+        generation_target = article_count or settings.content_pipeline_daily_min_articles
+        custom_manual_target = source_id is not None or article_count is not None
+        candidate_pool = limit_generation_candidates(candidate_pool, generation_target, custom_manual_target)
         generated_articles: list[Article] = []
         generated_ids: list[str] = []
         attempted_candidates: list[ContentCandidate] = []
@@ -248,7 +280,7 @@ async def run_daily_content_pipeline(
         if not dry_run:
             admin = await get_pipeline_admin(session)
             attempted_ids: set[str] = set()
-            while len(generated_articles) < settings.content_pipeline_daily_min_articles:
+            while len(generated_articles) < generation_target:
                 candidate = next_generation_candidate(
                     candidate_pool,
                     attempted_ids,
@@ -275,28 +307,35 @@ async def run_daily_content_pipeline(
                     else:
                         candidate.decision = "failed"
                         candidate.rejection_reason = candidate.rejection_reason or "generation_failed"
-                    generation_failures.append(
-                        {"candidate_id": candidate.id, "source_id": candidate.source_id, "error": error}
-                    )
+                    generation_failures.append({"candidate_id": candidate.id, "source_id": candidate.source_id, "error": error})
                     if consecutive_retryable_failures >= TRANSIENT_FAILURE_LIMIT:
                         aborted_reason = "repeated_transient_generation_failures"
                         break
         else:
-            attempted_candidates = candidate_pool[: settings.content_pipeline_daily_min_articles]
+            attempted_candidates = candidate_pool[:generation_target]
 
         degraded_rows = (
-            await session.execute(select(SourceWhitelist).where(SourceWhitelist.health_status.in_(["degraded", "failed"])))
-        ).scalars().all()
+            (await session.execute(select(SourceWhitelist).where(SourceWhitelist.health_status.in_(["degraded", "failed"]))))
+            .scalars()
+            .all()
+        )
         degraded_sources.extend(
-            {"id": source.id, "name": source.name, "health_status": source.health_status, "consecutive_failures": source.consecutive_failures}
+            {
+                "id": source.id,
+                "name": source.name,
+                "health_status": source.health_status,
+                "consecutive_failures": source.consecutive_failures,
+            }
             for source in degraded_rows
         )
 
         counts = report_counts(successful_candidates, generated_articles)
         quota_met = (
-            counts["taiwan_media_count"] >= settings.content_pipeline_daily_taiwan_media_min
+            len(generated_articles) >= generation_target
+            if custom_manual_target
+            else counts["taiwan_media_count"] >= settings.content_pipeline_daily_taiwan_media_min
             and counts["international_count"] >= settings.content_pipeline_daily_international_min
-            and len(generated_articles) >= settings.content_pipeline_daily_min_articles
+            and len(generated_articles) >= generation_target
         )
         status = "success" if quota_met and not failed_sources and not dry_run else "warning"
         if not attempted_candidates:
@@ -306,6 +345,7 @@ async def run_daily_content_pipeline(
         quota_detail = {
             "dry_run": dry_run,
             "candidate_pool_total": len(candidate_pool),
+            "crawled_candidate_total": crawled_candidate_total,
             "attempted_candidate_ids": [item.id for item in attempted_candidates],
             "attempted_total": len(attempted_candidates),
             "successful_candidate_ids": [item.id for item in successful_candidates],
@@ -313,7 +353,9 @@ async def run_daily_content_pipeline(
             "generation_failure_total": len(generation_failures),
             "generation_failures": generation_failures,
             "aborted_reason": aborted_reason,
-            "daily_min_articles": settings.content_pipeline_daily_min_articles,
+            "daily_min_articles": generation_target,
+            "requested_article_count": article_count,
+            "selected_source_id": source_id,
             "taiwan_min": settings.content_pipeline_daily_taiwan_media_min,
             "international_min": settings.content_pipeline_daily_international_min,
             "generated_article_ids": generated_ids,
@@ -356,12 +398,21 @@ async def run_manual_content_pipeline_background(
     report_date: date,
     force: bool,
     dry_run: bool,
+    source_id: str | None = None,
+    article_count: int | None = None,
 ) -> None:
     async with AsyncSessionLocal() as session:
         try:
-            result = await run_daily_content_pipeline(session, report_date, force, dry_run)
+            result = await run_daily_content_pipeline(session, report_date, force, dry_run, source_id, article_count)
             detail = dict(result.report.quota_detail or {})
-            detail.update({"manual_run_id": run_id, "trigger": "manual"})
+            detail.update(
+                {
+                    "manual_run_id": run_id,
+                    "trigger": "manual",
+                    "selected_source_id": source_id,
+                    "requested_article_count": article_count,
+                }
+            )
             result.report.quota_detail = detail
             await session.commit()
         except Exception as exc:
@@ -375,6 +426,8 @@ async def run_manual_content_pipeline_background(
                     "quota_detail": {
                         "manual_run_id": run_id,
                         "trigger": "manual",
+                        "selected_source_id": source_id,
+                        "requested_article_count": article_count,
                         "error": error,
                     },
                     "message": error["message"],

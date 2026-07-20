@@ -4,7 +4,7 @@ from app.services.content_pipeline.crawlers.http_crawler import fetch_text
 from app.services.content_pipeline.parsers.html_parser import parse_yahoo_autos_candidates
 
 
-async def crawl_yahoo_autos(source: SourceWhitelist) -> CrawlResult:
+async def crawl_yahoo_autos(source: SourceWhitelist, candidate_limit: int | None = None) -> CrawlResult:
     targets = [
         (source.list_url, "ev_topic", False),
         (source.homepage_url, "homepage_ev_filter", True),
@@ -25,7 +25,7 @@ async def crawl_yahoo_autos(source: SourceWhitelist) -> CrawlResult:
                 raw_html,
                 final_url,
                 source.domain,
-                source.max_candidates_per_run,
+                candidate_limit or source.max_candidates_per_run,
                 require_ev_keyword=require_ev_keyword,
             )
             attempts.append(

@@ -312,6 +312,8 @@ class AdminContentPipelineRunPayload(BaseModel):
     date: Date | None = None
     force: bool = False
     dry_run: bool = False
+    source_id: str | None = None
+    article_count: int | None = Field(default=None, ge=1, le=20)
 
 
 class AdminDailyContentReportOut(BaseModel):

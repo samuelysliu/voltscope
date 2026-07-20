@@ -1,7 +1,7 @@
-from dataclasses import dataclass
-from datetime import UTC, datetime
 import hashlib
 import re
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from sqlalchemy import select
@@ -168,8 +168,12 @@ async def create_candidate_from_crawl(
     return item
 
 
-async def crawl_source_to_candidates(session: AsyncSession, source_id: str) -> CandidateIngestResult:
-    crawl_result = await test_crawl_source(session, source_id)
+async def crawl_source_to_candidates(
+    session: AsyncSession,
+    source_id: str,
+    candidate_limit: int | None = None,
+) -> CandidateIngestResult:
+    crawl_result = await test_crawl_source(session, source_id, candidate_limit)
     source = crawl_result.source
     created: list[ContentCandidate] = []
     duplicates = 0
@@ -212,12 +216,15 @@ async def rank_quota_candidates(
     session: AsyncSession,
     taiwan_min: int = 1,
     international_min: int = 2,
+    source_id: str | None = None,
 ) -> list[ContentCandidate]:
     stmt = (
         select(ContentCandidate)
         .where(ContentCandidate.decision == "pending")
         .order_by(ContentCandidate.relevance_score.desc(), ContentCandidate.novelty_score.desc(), ContentCandidate.created_at.desc())
     )
+    if source_id:
+        stmt = stmt.where(ContentCandidate.source_id == source_id)
     candidates = (await session.execute(stmt)).scalars().all()
     selected: list[ContentCandidate] = []
 

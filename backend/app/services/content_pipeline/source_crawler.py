@@ -32,13 +32,13 @@ def _method_plan(source: SourceWhitelist) -> list[str]:
     return ["rss", "html", "playwright"]
 
 
-async def _run_method(method: str, source: SourceWhitelist) -> CrawlResult:
+async def _run_method(method: str, source: SourceWhitelist, candidate_limit: int) -> CrawlResult:
     if method == "rss":
-        return await crawl_rss(source)
+        return await crawl_rss(source, candidate_limit)
     if method == "html":
-        return await crawl_static_html(source)
+        return await crawl_static_html(source, candidate_limit)
     if method == "playwright":
-        return await crawl_playwright(source)
+        return await crawl_playwright(source, candidate_limit)
     return CrawlResult(
         fallback_used={
             "method": "api",
@@ -63,10 +63,11 @@ def _mark_source_failure(source: SourceWhitelist, now: datetime) -> None:
         source.health_status = "degraded" if source.consecutive_failures >= 3 else "failed"
 
 
-async def test_crawl_source(session: AsyncSession, source_id: str) -> TestCrawlResult:
+async def test_crawl_source(session: AsyncSession, source_id: str, candidate_limit: int | None = None) -> TestCrawlResult:
     source = await session.get(SourceWhitelist, source_id)
     if source is None:
         raise AppError("CONTENT_SOURCE_NOT_FOUND", "Content source not found", 404)
+    effective_limit = candidate_limit or source.max_candidates_per_run
 
     now = datetime.now(UTC)
     run = CrawlerRun(source_id=source.id, job_type="source_test", status="running", started_at=now, created_at=now)
@@ -84,7 +85,7 @@ async def test_crawl_source(session: AsyncSession, source_id: str) -> TestCrawlR
         else:
             seen_urls: set[str] = set()
             for method in _method_plan(source):
-                result = await _run_method(method, source)
+                result = await _run_method(method, source, effective_limit)
                 attempts.append(result.fallback_used)
                 if result.error_message and not error_message:
                     error_message = result.error_message
@@ -93,7 +94,7 @@ async def test_crawl_source(session: AsyncSession, source_id: str) -> TestCrawlR
                         continue
                     seen_urls.add(candidate.source_url)
                     candidates.append(candidate)
-                    if len(candidates) >= source.max_candidates_per_run:
+                    if len(candidates) >= effective_limit:
                         break
                 if candidates:
                     break

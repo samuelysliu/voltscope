@@ -43,6 +43,13 @@ type RunAccepted = {
   already_running: boolean;
 };
 
+type ContentSource = {
+  id: string;
+  name: string;
+  domain: string;
+  enabled: boolean;
+};
+
 function authHeaders(token: string) {
   return { authorization: `Bearer ${token}` };
 }
@@ -80,6 +87,9 @@ export function ContentPipelineDashboard() {
   const [reports, setReports] = useState<DailyReport[]>([]);
   const [message, setMessage] = useState("");
   const [runDate, setRunDate] = useState(new Date().toISOString().slice(0, 10));
+  const [sources, setSources] = useState<ContentSource[]>([]);
+  const [sourceId, setSourceId] = useState("");
+  const [articleCount, setArticleCount] = useState(5);
   const [force, setForce] = useState(false);
   const [dryRun, setDryRun] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
@@ -107,21 +117,42 @@ export function ContentPipelineDashboard() {
     setReports(data.items);
   }
 
+  async function loadSources(activeToken = token) {
+    if (!activeToken) return;
+    const response = await fetch(`${apiBase}/admin/content-sources?enabled=true`, { headers: authHeaders(activeToken) });
+    if (handleUnauthorized(response)) return;
+    if (!response.ok) {
+      setMessage("無法載入內容來源。");
+      return;
+    }
+    setSources((await response.json()) as ContentSource[]);
+  }
+
   useEffect(() => {
     const activeToken = getAdminToken();
     setToken(activeToken);
-    if (activeToken) void loadReports(activeToken);
+    if (activeToken) {
+      void loadReports(activeToken);
+      void loadSources(activeToken);
+    }
   }, []);
 
   async function runPipeline() {
     if (!token) return;
     setIsRunning(true);
-    setMessage("正在執行 AI 撈文，會從內容來源撈取候選文章並產生草稿...");
+    const selectedSource = sources.find((source) => source.id === sourceId);
+    setMessage(`正在從${selectedSource ? `「${selectedSource.name}」` : "所有啟用來源"}撈取文章，目標 ${articleCount} 篇...`);
     try {
       const response = await fetch(`${apiBase}/admin/content-pipeline/run-now`, {
         method: "POST",
         headers: { ...authHeaders(token), "content-type": "application/json" },
-        body: JSON.stringify({ date: runDate, force, dry_run: dryRun })
+        body: JSON.stringify({
+          date: runDate,
+          force,
+          dry_run: dryRun,
+          source_id: sourceId || null,
+          article_count: articleCount
+        })
       });
       if (handleUnauthorized(response)) return;
       if (!response.ok) {
@@ -190,6 +221,30 @@ export function ContentPipelineDashboard() {
           </CardHeader>
           <CardContent className="space-y-3">
             <Input type="date" value={runDate} onChange={(event) => setRunDate(event.target.value)} />
+            <label className="block space-y-1 text-sm">
+              <span>{"內容來源"}</span>
+              <select
+                className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                value={sourceId}
+                onChange={(event) => setSourceId(event.target.value)}
+              >
+                <option value="">{"所有啟用來源"}</option>
+                {sources.map((source) => (
+                  <option key={source.id} value={source.id}>{`${source.name} (${source.domain})`}</option>
+                ))}
+              </select>
+            </label>
+            <label className="block space-y-1 text-sm">
+              <span>{"文章數量（1 至 20）"}</span>
+              <Input
+                type="number"
+                min={1}
+                max={20}
+                required
+                value={articleCount}
+                onChange={(event) => setArticleCount(Math.min(20, Math.max(1, Number(event.target.value) || 1)))}
+              />
+            </label>
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" checked={dryRun} onChange={(event) => setDryRun(event.target.checked)} />
               {"只測試，不產生草稿"}
@@ -223,7 +278,7 @@ export function ContentPipelineDashboard() {
         <div>
           <h1 className="text-3xl font-bold">{"AI 撈文"}</h1>
           <p className="mt-2 text-sm text-zinc-600">
-            {"這是唯一的手動撈文入口：系統會從內容來源撈取候選文章，選出符合配額的內容，並用 AI 產生草稿供編輯審核。"}
+            {"這是唯一的手動撈文入口：系統會依照選擇的內容來源與文章數量撈取候選文章，並用 AI 產生草稿供編輯審核。"}
           </p>
         </div>
         {message ? <p className="rounded border border-line bg-white p-3 text-sm">{message}</p> : null}

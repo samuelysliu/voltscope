@@ -334,8 +334,9 @@ async def generate_article_from_candidate(
             )
         )
         shared_revision_codes = {
+            "article_hyperlink_detected",
             "generic_article_template_detected",
-            "missing_source_attribution",
+            "source_attribution_language_detected",
             "source_link_call_to_action_detected",
             "source_sentence_overlap_too_high",
         }

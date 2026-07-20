@@ -5,6 +5,7 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .next/
+.next-dev/
 node_modules/
 dist/
 build/

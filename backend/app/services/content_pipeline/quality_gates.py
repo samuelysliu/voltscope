@@ -70,13 +70,14 @@ def sentence_overlap_ratio(candidate: ContentCandidate, article_text: str) -> fl
     return round(max_ratio, 4)
 
 
-def has_source_attribution(candidate: ContentCandidate, html_values: list[str]) -> bool:
-    expected_url = (candidate.canonical_url or candidate.source_url).rstrip("/")
+def contains_public_article_link(html_values: list[str], text_values: list[str]) -> bool:
     parser = LinkParser()
     for html in html_values:
         parser.feed(html or "")
-    normalized_links = [link.rstrip("/") for link in parser.links]
-    return expected_url in normalized_links or candidate.source_url.rstrip("/") in normalized_links
+        if re.search(r"<a\b", html or "", re.IGNORECASE):
+            return True
+    combined = " ".join([*html_values, *text_values])
+    return bool(parser.links or re.search(r"(?:https?://|www\.)\S+", combined, re.IGNORECASE))
 
 
 def count_zh_chars(value: str) -> int:
@@ -133,6 +134,18 @@ def source_link_cta_matches(value: str) -> list[str]:
     return [phrase for phrase in SOURCE_LINK_CTA_PHRASES if phrase.lower() in normalized]
 
 
+SOURCE_ATTRIBUTION_PATTERNS = (
+    ("zh_source_report", re.compile(r"(?:\u6839\u64da|\u64da).{1,40}(?:\u5831\u5c0e|\u5831\u9053)")),
+    ("en_according_to_report", re.compile(r"\baccording to .{1,60}(?:report|article|publication|news outlet)\b", re.IGNORECASE)),
+    ("en_reported_by", re.compile(r"\b(?:as (?:first )?reported by|reported by)\b", re.IGNORECASE)),
+)
+
+
+def source_attribution_matches(value: str) -> list[str]:
+    normalized = strip_html(value)
+    return [name for name, pattern in SOURCE_ATTRIBUTION_PATTERNS if pattern.search(normalized)]
+
+
 def issue(code: str, severity: str, message: str, **meta) -> dict:
     data = {"code": code, "severity": severity, "message": message}
     data.update(meta)
@@ -161,10 +174,16 @@ def run_quality_gates(
     if domain(candidate.source_url) != source_domain and not domain(candidate.source_url).endswith(f".{source_domain}"):
         issues.append(issue("source_url_not_whitelisted", "critical", "Candidate URL is outside the source whitelist domain"))
 
-    if not has_source_attribution(candidate, [zh_payload.get("html", ""), en_payload.get("html", "")]):
-        issues.append(
-            issue("missing_source_attribution", "critical", "Generated article must link back to the source URL or source domain")
-        )
+    html_values = [zh_payload.get("html", ""), en_payload.get("html", "")]
+    text_values = [
+        str(payload.get(key, ""))
+        for payload in (zh_payload, en_payload)
+        for key in ("title", "excerpt", "text", "seo_title", "seo_description")
+    ]
+    has_public_link = contains_public_article_link(html_values, text_values)
+    metrics["contains_public_article_link"] = has_public_link
+    if has_public_link:
+        issues.append(issue("article_hyperlink_detected", "critical", "Generated public article must not contain hyperlinks or URLs"))
 
     notes = candidate.factual_notes or {}
     if notes.get("should_publish") is False:
@@ -184,6 +203,7 @@ def run_quality_gates(
             strip_html(en_payload.get("html", "")),
         ]
     )
+    public_article_text = " ".join([*text_values, *(strip_html(value) for value in html_values)])
     overlap = sentence_overlap_ratio(candidate, combined_text)
     metrics["max_source_sentence_overlap"] = overlap
     if overlap > settings.content_pipeline_max_source_sentence_overlap:
@@ -250,7 +270,7 @@ def run_quality_gates(
             )
         )
 
-    matched_source_ctas = source_link_cta_matches(combined_text)
+    matched_source_ctas = source_link_cta_matches(public_article_text)
     metrics["source_link_cta_matches"] = matched_source_ctas
     if matched_source_ctas:
         issues.append(
@@ -259,6 +279,18 @@ def run_quality_gates(
                 "critical",
                 "Source links must be factual attribution, not a call to read more elsewhere",
                 phrases=matched_source_ctas,
+            )
+        )
+
+    matched_source_attributions = source_attribution_matches(public_article_text)
+    metrics["source_attribution_matches"] = matched_source_attributions
+    if matched_source_attributions:
+        issues.append(
+            issue(
+                "source_attribution_language_detected",
+                "critical",
+                "Generated article must not mention that another publication reported the story",
+                patterns=matched_source_attributions,
             )
         )
 

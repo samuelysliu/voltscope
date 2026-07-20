@@ -4,7 +4,7 @@ from app.services.content_pipeline.crawlers.http_crawler import fetch_text
 from app.services.content_pipeline.parsers.rss_parser import parse_rss_candidates
 
 
-async def crawl_rss(source: SourceWhitelist) -> CrawlResult:
+async def crawl_rss(source: SourceWhitelist, candidate_limit: int | None = None) -> CrawlResult:
     if not source.rss_url:
         return CrawlResult(fallback_used={"method": "rss", "status": "skipped", "message": "No RSS URL configured"})
     try:
@@ -14,7 +14,7 @@ async def crawl_rss(source: SourceWhitelist) -> CrawlResult:
             fallback_used={"method": "rss", "status": "failed", "message": str(exc)[:500]},
             error_message=str(exc)[:1000],
         )
-    candidates = parse_rss_candidates(raw_xml, final_url, source.domain, source.max_candidates_per_run)
+    candidates = parse_rss_candidates(raw_xml, final_url, source.domain, candidate_limit or source.max_candidates_per_run)
     return CrawlResult(
         candidates=candidates,
         fallback_used={"method": "rss", "status": "success" if candidates else "empty", "url": final_url},

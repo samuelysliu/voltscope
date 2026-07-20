@@ -5,9 +5,10 @@ from app.services.content_pipeline.crawlers.yahoo_autos_crawler import crawl_yah
 from app.services.content_pipeline.parsers.html_parser import parse_evoasis_candidates, parse_html_candidates
 
 
-async def crawl_static_html(source: SourceWhitelist) -> CrawlResult:
+async def crawl_static_html(source: SourceWhitelist, candidate_limit: int | None = None) -> CrawlResult:
+    limit = candidate_limit or source.max_candidates_per_run
     if normalize_domain(source.domain) == "autos.yahoo.com.tw":
-        return await crawl_yahoo_autos(source)
+        return await crawl_yahoo_autos(source, limit)
     target_url = source.list_url or source.homepage_url
     if not target_url:
         return CrawlResult(fallback_used={"method": "html", "status": "skipped", "message": "No list or homepage URL configured"})
@@ -19,9 +20,9 @@ async def crawl_static_html(source: SourceWhitelist) -> CrawlResult:
             error_message=str(exc)[:1000],
         )
     if normalize_domain(source.domain) == "evoasis.com.tw":
-        candidates = parse_evoasis_candidates(raw_html, final_url, source.domain, source.max_candidates_per_run)
+        candidates = parse_evoasis_candidates(raw_html, final_url, source.domain, limit)
     else:
-        candidates = parse_html_candidates(raw_html, final_url, source.domain, source.max_candidates_per_run)
+        candidates = parse_html_candidates(raw_html, final_url, source.domain, limit)
     return CrawlResult(
         candidates=candidates,
         fallback_used={"method": "html", "status": "success" if candidates else "empty", "url": final_url},

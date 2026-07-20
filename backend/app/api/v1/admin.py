@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from app.api.v1.deps import SessionDep, current_admin_user
 from app.core.config import get_settings
 from app.core.errors import AppError
+from app.jobs.content_pipeline import run_manual_content_pipeline_background, upsert_report
 from app.models import (
     Ad,
     AiArticleCandidate,
@@ -45,6 +46,8 @@ from app.schemas.admin import (
     AdminAiSourceOut,
     AdminAiSourcePayload,
     AdminArticleGenerationJobOut,
+    AdminArticleListItem,
+    AdminArticlePayload,
     AdminCandidateGenerateOut,
     AdminCandidateIngestOut,
     AdminCandidateRejectPayload,
@@ -53,36 +56,33 @@ from app.schemas.admin import (
     AdminContentPipelineMonitoringOut,
     AdminContentPipelineRunAcceptedOut,
     AdminContentPipelineRunPayload,
+    AdminContentSourceDetailOut,
+    AdminContentSourceOut,
+    AdminContentSourcePayload,
     AdminCrawlerCandidateOut,
     AdminCrawlerRunOut,
     AdminDailyContentReportListOut,
     AdminDailyContentReportOut,
-    AdminContentSourceDetailOut,
-    AdminContentSourceOut,
-    AdminContentSourcePayload,
-    AdminQuotaSelectionOut,
+    AdminFailedQualityGateOut,
     AdminMistralGenerationLogOut,
+    AdminQuotaSelectionOut,
     AdminSelectorRepairCreatePayload,
     AdminSelectorRepairProposalOut,
     AdminSelectorRepairRejectPayload,
-    AdminFailedQualityGateOut,
-    AdminTestCrawlOut,
     AdminSourceHealthOut,
-    AdminSourceParserVersionPayload,
     AdminSourceParserVersionOut,
-    AdminArticleListItem,
-    AdminArticlePayload,
+    AdminSourceParserVersionPayload,
+    AdminTestCrawlOut,
     AdminUserUpdate,
 )
 from app.schemas.content import ArticleTranslationIn
 from app.services.ai_ingest import approve_candidate_as_article, run_ai_ingest
-from app.jobs.content_pipeline import run_manual_content_pipeline_background, upsert_report
 from app.services.content_pipeline.ai.article_generator import queue_article_generation, run_queued_article_generation
 from app.services.content_pipeline.candidates import crawl_source_to_candidates, select_quota_candidates
 from app.services.content_pipeline.crawlers.base import CrawledCandidate
 from app.services.content_pipeline.selector_repair import (
-    approve_parser_version,
     apply_selector_repair_proposal,
+    approve_parser_version,
     create_selector_repair_proposal,
     next_parser_version,
     reject_selector_repair_proposal,
@@ -295,7 +295,9 @@ def serialize_mistral_log(log: MistralGenerationLog) -> AdminMistralGenerationLo
     )
 
 
-def serialize_article_generation_job(job: ArticleGenerationJob, logs: list[MistralGenerationLog] | None = None) -> AdminArticleGenerationJobOut:
+def serialize_article_generation_job(
+    job: ArticleGenerationJob, logs: list[MistralGenerationLog] | None = None
+) -> AdminArticleGenerationJobOut:
     return AdminArticleGenerationJobOut(
         id=job.id,
         candidate_id=job.candidate_id,
@@ -439,8 +441,14 @@ async def serialize_ai_job(job: AiIngestJob, session: SessionDep, include_candid
     if not include_candidates:
         return AdminAiJobOut(**base)
     candidates = (
-        await session.execute(select(AiArticleCandidate).where(AiArticleCandidate.job_id == job.id).order_by(AiArticleCandidate.created_at.desc()))
-    ).scalars().all()
+        (
+            await session.execute(
+                select(AiArticleCandidate).where(AiArticleCandidate.job_id == job.id).order_by(AiArticleCandidate.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
     return AdminAiJobDetailOut(**base, candidates=[serialize_ai_candidate(candidate) for candidate in candidates])
 
 
@@ -464,8 +472,8 @@ async def apply_article_payload(article: Article, payload: AdminArticlePayload, 
     await release_deleted_article_slug_conflicts(article.id, payload.translations, session)
 
     existing_translation_rows = (
-        await session.execute(select(ArticleTranslation).where(ArticleTranslation.article_id == article.id))
-    ).scalars().all()
+        (await session.execute(select(ArticleTranslation).where(ArticleTranslation.article_id == article.id))).scalars().all()
+    )
     existing_translations = {translation.locale: translation for translation in existing_translation_rows}
     incoming_locales = set()
     for item in payload.translations:
@@ -558,11 +566,15 @@ async def dashboard(session: SessionDep) -> dict:
     yesterday_start = datetime.combine(yesterday, time.min, tzinfo=local_timezone).astimezone(UTC)
     yesterday_end = yesterday_start + timedelta(days=1)
     articles = await session.scalar(select(func.count()).select_from(Article).where(Article.deleted_at.is_(None)))
-    published = await session.scalar(select(func.count()).select_from(Article).where(Article.status == "published", Article.deleted_at.is_(None)))
+    published = await session.scalar(
+        select(func.count()).select_from(Article).where(Article.status == "published", Article.deleted_at.is_(None))
+    )
     drafts = await session.scalar(select(func.count()).select_from(Article).where(Article.status == "draft", Article.deleted_at.is_(None)))
     users = await session.scalar(select(func.count()).select_from(User))
     ads = await session.scalar(select(func.count()).select_from(Ad))
-    today_views = await session.scalar(select(func.coalesce(func.sum(ArticleViewDaily.view_count), 0)).where(ArticleViewDaily.view_date == date.today()))
+    today_views = await session.scalar(
+        select(func.coalesce(func.sum(ArticleViewDaily.view_count), 0)).where(ArticleViewDaily.view_date == date.today())
+    )
     crawler_status_rows = (
         await session.execute(
             select(CrawlerRun.status, func.count())
@@ -654,17 +666,15 @@ async def create_admin_content_source(payload: AdminContentSourcePayload, sessio
 @router.get("/content-sources/{source_id}", response_model=AdminContentSourceDetailOut)
 async def admin_content_source_detail(source_id: str, session: SessionDep) -> AdminContentSourceDetailOut:
     source = await session.scalar(
-        select(SourceWhitelist)
-        .options(selectinload(SourceWhitelist.parser_versions))
-        .where(SourceWhitelist.id == source_id)
+        select(SourceWhitelist).options(selectinload(SourceWhitelist.parser_versions)).where(SourceWhitelist.id == source_id)
     )
     if source is None:
         raise AppError("CONTENT_SOURCE_NOT_FOUND", "Content source not found", 404)
     recent_runs = (
-        await session.execute(
-            select(CrawlerRun).where(CrawlerRun.source_id == source.id).order_by(CrawlerRun.created_at.desc()).limit(5)
-        )
-    ).scalars().all()
+        (await session.execute(select(CrawlerRun).where(CrawlerRun.source_id == source.id).order_by(CrawlerRun.created_at.desc()).limit(5)))
+        .scalars()
+        .all()
+    )
     data = serialize_content_source(source).model_dump()
     versions = sorted(source.parser_versions, key=lambda item: item.version, reverse=True)
     return AdminContentSourceDetailOut(
@@ -679,10 +689,14 @@ async def admin_content_source_parser_versions(source_id: str, session: SessionD
     if await session.get(SourceWhitelist, source_id) is None:
         raise AppError("CONTENT_SOURCE_NOT_FOUND", "Content source not found", 404)
     rows = (
-        await session.execute(
-            select(SourceParserVersion).where(SourceParserVersion.source_id == source_id).order_by(SourceParserVersion.version.desc())
+        (
+            await session.execute(
+                select(SourceParserVersion).where(SourceParserVersion.source_id == source_id).order_by(SourceParserVersion.version.desc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [serialize_parser_version(row) for row in rows]
 
 
@@ -941,12 +955,16 @@ async def run_admin_content_pipeline(
     settings = get_settings()
     if not payload.dry_run and not settings.mistral_api_key.strip():
         raise AppError("AI_PROVIDER_NOT_CONFIGURED", "Mistral API key is not configured", 503)
+    if payload.source_id:
+        selected_source = await session.get(SourceWhitelist, payload.source_id)
+        if selected_source is None:
+            raise AppError("CONTENT_SOURCE_NOT_FOUND", "Content source not found", 404)
+        if not selected_source.enabled:
+            raise AppError("CONTENT_SOURCE_DISABLED", "Selected content source is disabled", 409)
     report_date = payload.date or datetime.now(ZoneInfo(settings.content_pipeline_timezone)).date()
     existing = await session.scalar(select(DailyContentReport).where(DailyContentReport.report_date == report_date))
     running_is_current = bool(
-        existing is not None
-        and existing.status == "running"
-        and existing.updated_at >= datetime.now(UTC) - timedelta(hours=2)
+        existing is not None and existing.status == "running" and existing.updated_at >= datetime.now(UTC) - timedelta(hours=2)
     )
     if existing is not None and running_is_current:
         existing_run_id = str((existing.quota_detail or {}).get("manual_run_id") or existing.id)
@@ -967,6 +985,8 @@ async def run_admin_content_pipeline(
                 "manual_run_id": run_id,
                 "trigger": "manual",
                 "dry_run": payload.dry_run,
+                "selected_source_id": payload.source_id,
+                "requested_article_count": payload.article_count,
             },
             "message": "Manual content pipeline queued.",
         },
@@ -978,6 +998,8 @@ async def run_admin_content_pipeline(
         report_date,
         payload.force,
         payload.dry_run,
+        payload.source_id,
+        payload.article_count,
     )
     return AdminContentPipelineRunAcceptedOut(
         run_id=run_id,
@@ -999,19 +1021,29 @@ async def admin_content_pipeline_monitoring(session: SessionDep) -> AdminContent
     )
     quota_items = [serialize_content_candidate(candidate) for candidate in quota_candidates]
     source_rows = (
-        await session.execute(
-            select(SourceWhitelist).order_by(SourceWhitelist.enabled.desc(), SourceWhitelist.health_status.asc(), SourceWhitelist.name.asc())
+        (
+            await session.execute(
+                select(SourceWhitelist).order_by(
+                    SourceWhitelist.enabled.desc(), SourceWhitelist.health_status.asc(), SourceWhitelist.name.asc()
+                )
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     recent_jobs = (
-        await session.execute(
-            select(ArticleGenerationJob)
-            .options(selectinload(ArticleGenerationJob.candidate).selectinload(ContentCandidate.source))
-            .where(ArticleGenerationJob.quality_gate_result.is_not(None))
-            .order_by(ArticleGenerationJob.created_at.desc())
-            .limit(100)
+        (
+            await session.execute(
+                select(ArticleGenerationJob)
+                .options(selectinload(ArticleGenerationJob.candidate).selectinload(ContentCandidate.source))
+                .where(ArticleGenerationJob.quality_gate_result.is_not(None))
+                .order_by(ArticleGenerationJob.created_at.desc())
+                .limit(100)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     failed_quality_gates = []
     for job in recent_jobs:
         gate = job.quality_gate_result or {}
@@ -1021,7 +1053,9 @@ async def admin_content_pipeline_monitoring(session: SessionDep) -> AdminContent
             break
 
     report_status_rows = (await session.execute(select(DailyContentReport.status, func.count()).group_by(DailyContentReport.status))).all()
-    candidate_decision_rows = (await session.execute(select(ContentCandidate.decision, func.count()).group_by(ContentCandidate.decision))).all()
+    candidate_decision_rows = (
+        await session.execute(select(ContentCandidate.decision, func.count()).group_by(ContentCandidate.decision))
+    ).all()
     return AdminContentPipelineMonitoringOut(
         latest_report=serialize_daily_content_report(latest_report) if latest_report is not None else None,
         quota_preview=AdminQuotaSelectionOut(
@@ -1104,7 +1138,12 @@ async def admin_content_pipeline_candidates(
 
 @router.get("/content-pipeline/quota-selection", response_model=AdminQuotaSelectionOut)
 async def admin_content_pipeline_quota_selection(session: SessionDep) -> AdminQuotaSelectionOut:
-    candidates = await select_quota_candidates(session, get_settings().content_pipeline_daily_taiwan_media_min, get_settings().content_pipeline_daily_international_min, get_settings().content_pipeline_daily_min_articles)
+    candidates = await select_quota_candidates(
+        session,
+        get_settings().content_pipeline_daily_taiwan_media_min,
+        get_settings().content_pipeline_daily_international_min,
+        get_settings().content_pipeline_daily_min_articles,
+    )
     items = [serialize_content_candidate(candidate) for candidate in candidates]
     return AdminQuotaSelectionOut(
         candidates=items,
@@ -1129,7 +1168,9 @@ async def accept_admin_content_candidate(candidate_id: str, session: SessionDep)
 
 
 @router.post("/content-pipeline/candidates/{candidate_id}/reject", response_model=AdminContentCandidateOut)
-async def reject_admin_content_candidate(candidate_id: str, payload: AdminCandidateRejectPayload, session: SessionDep) -> AdminContentCandidateOut:
+async def reject_admin_content_candidate(
+    candidate_id: str, payload: AdminCandidateRejectPayload, session: SessionDep
+) -> AdminContentCandidateOut:
     candidate = await session.get(ContentCandidate, candidate_id)
     if candidate is None:
         raise AppError("CONTENT_CANDIDATE_NOT_FOUND", "Content candidate not found", 404)
@@ -1143,13 +1184,18 @@ async def reject_admin_content_candidate(candidate_id: str, payload: AdminCandid
         raise AppError("CONTENT_CANDIDATE_GENERATING", "Candidates cannot be rejected while generation is running", 409)
 
     generated_articles = (
-        await session.execute(
-            select(Article)
-            .join(ArticleGenerationJob, ArticleGenerationJob.generated_article_id == Article.id)
-            .options(selectinload(Article.translations))
-            .where(ArticleGenerationJob.candidate_id == candidate.id)
+        (
+            await session.execute(
+                select(Article)
+                .join(ArticleGenerationJob, ArticleGenerationJob.generated_article_id == Article.id)
+                .options(selectinload(Article.translations))
+                .where(ArticleGenerationJob.candidate_id == candidate.id)
+            )
         )
-    ).scalars().unique().all()
+        .scalars()
+        .unique()
+        .all()
+    )
     now = datetime.now(UTC)
     for article in generated_articles:
         article.status = "archived"
@@ -1184,22 +1230,24 @@ async def generate_admin_content_candidate(
 @router.get("/content-pipeline/generation-jobs", response_model=list[AdminArticleGenerationJobOut])
 async def admin_content_pipeline_generation_jobs(session: SessionDep) -> list[AdminArticleGenerationJobOut]:
     jobs = (
-        await session.execute(
-            select(ArticleGenerationJob)
-            .options(selectinload(ArticleGenerationJob.mistral_logs))
-            .order_by(ArticleGenerationJob.created_at.desc())
-            .limit(50)
+        (
+            await session.execute(
+                select(ArticleGenerationJob)
+                .options(selectinload(ArticleGenerationJob.mistral_logs))
+                .order_by(ArticleGenerationJob.created_at.desc())
+                .limit(50)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [serialize_article_generation_job(job, sorted(job.mistral_logs, key=lambda item: item.created_at)) for job in jobs]
 
 
 @router.get("/content-pipeline/generation-jobs/{job_id}", response_model=AdminArticleGenerationJobOut)
 async def admin_content_pipeline_generation_job(job_id: str, session: SessionDep) -> AdminArticleGenerationJobOut:
     job = await session.scalar(
-        select(ArticleGenerationJob)
-        .options(selectinload(ArticleGenerationJob.mistral_logs))
-        .where(ArticleGenerationJob.id == job_id)
+        select(ArticleGenerationJob).options(selectinload(ArticleGenerationJob.mistral_logs)).where(ArticleGenerationJob.id == job_id)
     )
     if job is None:
         raise AppError("ARTICLE_GENERATION_JOB_NOT_FOUND", "Article generation job not found", 404)
@@ -1335,11 +1383,7 @@ def build_admin_articles_query(
         )
     if topic:
         stmt = stmt.where(
-            Article.id.in_(
-                select(ArticleTopic.article_id)
-                .join(Topic, Topic.id == ArticleTopic.topic_id)
-                .where(Topic.slug == topic)
-            )
+            Article.id.in_(select(ArticleTopic.article_id).join(Topic, Topic.id == ArticleTopic.topic_id).where(Topic.slug == topic))
         )
     local_timezone = ZoneInfo(get_settings().content_pipeline_timezone)
     if created_from:
@@ -1380,9 +1424,7 @@ async def admin_articles(
             )
         ).all()
         for article_id, topic_id, slug, name_zh, name_en in topic_rows:
-            topics_by_article[article_id].append(
-                {"id": topic_id, "slug": slug, "name_zh": name_zh, "name_en": name_en}
-            )
+            topics_by_article[article_id].append({"id": topic_id, "slug": slug, "name_zh": name_zh, "name_en": name_en})
     items = []
     for row in rows:
         item = (await serialize_article_item(row)).model_dump()
@@ -1401,8 +1443,10 @@ async def admin_article_detail(article_id: str, session: SessionDep) -> dict:
     if article is None:
         raise AppError("ARTICLE_NOT_FOUND", "Article not found", 404)
     topics = (
-        await session.execute(select(ArticleTopic).where(ArticleTopic.article_id == article.id).order_by(ArticleTopic.is_primary.desc()))
-    ).scalars().all()
+        (await session.execute(select(ArticleTopic).where(ArticleTopic.article_id == article.id).order_by(ArticleTopic.is_primary.desc())))
+        .scalars()
+        .all()
+    )
     return {
         "id": article.id,
         "author_id": article.author_id,
@@ -1444,7 +1488,9 @@ async def create_admin_article(payload: AdminArticlePayload, session: SessionDep
 
 
 @router.put("/articles/{article_id}")
-async def update_admin_article(article_id: str, payload: AdminArticlePayload, session: SessionDep, admin: User = Depends(current_admin_user)) -> dict:
+async def update_admin_article(
+    article_id: str, payload: AdminArticlePayload, session: SessionDep, admin: User = Depends(current_admin_user)
+) -> dict:
     article = await session.scalar(
         select(Article).options(selectinload(Article.translations)).where(Article.id == article_id, Article.deleted_at.is_(None))
     )
@@ -1458,9 +1504,7 @@ async def update_admin_article(article_id: str, payload: AdminArticlePayload, se
 @router.delete("/articles/{article_id}")
 async def delete_admin_article(article_id: str, session: SessionDep) -> dict:
     article = await session.scalar(
-        select(Article)
-        .options(selectinload(Article.translations))
-        .where(Article.id == article_id, Article.deleted_at.is_(None))
+        select(Article).options(selectinload(Article.translations)).where(Article.id == article_id, Article.deleted_at.is_(None))
     )
     if article is None:
         raise AppError("ARTICLE_NOT_FOUND", "Article not found", 404)

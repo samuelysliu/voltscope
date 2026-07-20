@@ -3,10 +3,11 @@ import json
 from app.core.config import get_settings
 from app.models import ContentCandidate
 
-SOURCE_LINK_INSTRUCTION = (
-    "Attach the required hyperlink directly to the named source publication in a factual attribution sentence. "
-    "Never add a standalone source call to action or wording equivalent to 'for more information/details, see, read, "
-    "visit, or refer to the source'. The article must not tell readers to consult another page for more content. "
+PUBLIC_ARTICLE_SOURCE_RULE = (
+    "Do not name or credit the source publication and do not write phrases equivalent to 'according to X's report', "
+    "'reported by X', 'for details see X', or 'read more at X'. Do not include URLs, domain names, anchor tags, source notes, "
+    "references, or calls to visit another page anywhere in the title, excerpt, HTML, text, or SEO fields. Attribute claims "
+    "only to the original people or organizations identified in the factual record when that attribution is material. "
 )
 
 
@@ -81,7 +82,8 @@ def article_generation_messages(
                 "You are a senior reporter for VoltScope, an EV and charging news publication. Return strict JSON only. "
                 "Write a fact-dense, original news story from the supplied factual record. Never pad the article with "
                 "generic EV-market commentary, a meeting-summary structure, or unsupported Taiwan relevance. "
-                "Attribute claims to their speaker or source, distinguish facts from uncertainty, and do not copy source sentences. "
+                "Attribute claims to their original speaker or organization, distinguish facts from uncertainty, and do not copy "
+                "source sentences. "
                 "For Traditional Chinese, use natural Taiwan news language and translate the semantic meaning of the headline. "
                 "Company and product names may remain in English, but an English headline followed by a generic Chinese suffix is invalid. "
                 "For example, the headline 'Ford Recalls 43,000 Mustang Mach-E EVs Over Diffs That May Go Bang' should become "
@@ -94,8 +96,8 @@ def article_generation_messages(
             "role": "user",
             "content": (
                 f"Write a {language} article. Return JSON with keys: title, slug, excerpt, html, text, "
-                "seo_title, seo_description. Use p, h2, and a tags in HTML. Include one source link using the exact source_url. "
-                f"{SOURCE_LINK_INSTRUCTION}"
+                "seo_title, seo_description. Use only p and h2 tags in HTML. "
+                f"{PUBLIC_ARTICLE_SOURCE_RULE}"
                 f"The article body in both html and text must contain {length_requirement}; the publication gate is {minimum} {unit}. "
                 "Count the article body before responding and aim above the gate, but never invent facts to reach length. "
                 "Open with the most newsworthy verified event and its concrete scale or consequence. Follow with evidence, "
@@ -140,8 +142,8 @@ def article_revision_messages(
                 f"Rewrite this {language} article. Return all keys: title, slug, excerpt, html, text, seo_title, seo_description. "
                 f"The current article has {current_length} {unit}; the publication minimum is {minimum}. "
                 f"Rewrite the complete article to contain {length_requirement} in both html and text, and count only the article body. "
-                "Do not summarize or shorten sections that are supported by the factual record. Use p, h2, and a tags in HTML, "
-                f"and include the exact source URL {candidate.source_url}. {SOURCE_LINK_INSTRUCTION}"
+                "Do not summarize or shorten sections that are supported by the factual record. Use only p and h2 tags in HTML. "
+                f"{PUBLIC_ARTICLE_SOURCE_RULE}"
                 "For Traditional Chinese, the headline must state the event "
                 "in natural Taiwan news language rather than retaining the English source headline. Do not mention the editing process, "
                 "missing context, or Taiwan unless the facts directly involve Taiwan.\n\n"
@@ -173,8 +175,8 @@ def article_translation_messages(
             "role": "user",
             "content": (
                 "Translate the complete Chinese master into English. Return all keys: title, slug, excerpt, html, text, "
-                "seo_title, seo_description. Preserve the article structure with p, h2, and a tags and retain the exact source "
-                f"URL {candidate.source_url}. {SOURCE_LINK_INSTRUCTION}"
+                "seo_title, seo_description. Preserve the article structure with only p and h2 tags. "
+                f"{PUBLIC_ARTICLE_SOURCE_RULE}"
                 f"The English body must contain {length_requirement}; the publication gate is "
                 f"{minimum} English words. Translate every substantive Chinese paragraph instead of shortening it. The factual "
                 "record is supplied only to prevent translation errors, not as permission to independently rewrite the report.\n\n"
@@ -208,8 +210,8 @@ def article_translation_revision_messages(
             "content": (
                 "Return all keys: title, slug, excerpt, html, text, seo_title, seo_description. The current English translation "
                 f"has {current_length} English words and failed {json.dumps(issue_codes)}. Produce {length_requirement}; the "
-                f"publication gate is {minimum}. Preserve p, h2, and a tags and the exact source URL {candidate.source_url}. "
-                f"{SOURCE_LINK_INSTRUCTION}"
+                f"publication gate is {minimum}. Preserve the article structure with only p and h2 tags. "
+                f"{PUBLIC_ARTICLE_SOURCE_RULE}"
                 "Translate every substantive paragraph in the Chinese master and do not independently regenerate or summarize it.\n\n"
                 f"Factual record: {json.dumps(factual_notes, ensure_ascii=False)}\n\n"
                 f"Finalized Chinese master: {json.dumps(zh_article, ensure_ascii=False)}\n\n"
@@ -244,8 +246,8 @@ def article_review_messages(
                 f"Review and rewrite this {language} draft. Return all keys: title, slug, excerpt, html, text, seo_title, "
                 f"seo_description. The article body must contain {length_requirement} in both html and text; the publication gate is "
                 f"{minimum} {unit}. Count the body before responding and do not shorten a draft below that gate. "
-                "Use descriptive news structure and include one "
-                f"source link using the exact URL {candidate.source_url}. {SOURCE_LINK_INSTRUCTION}"
+                "Use descriptive news structure with only p and h2 tags in HTML. "
+                f"{PUBLIC_ARTICLE_SOURCE_RULE}"
                 "Do not invent facts to meet the length target. "
                 "For Traditional Chinese, use natural Taiwan news language and translate the meaning of the headline.\n\n"
                 f"Factual record: {json.dumps(factual_notes, ensure_ascii=False)}\n\n"

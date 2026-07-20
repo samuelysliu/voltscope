@@ -7,7 +7,12 @@ from fastapi import BackgroundTasks
 import app.api.v1.admin as admin_api
 from app.core.config import Settings
 from app.core.errors import AppError
-from app.jobs.content_pipeline import is_retryable_pipeline_error, next_generation_candidate, report_counts
+from app.jobs.content_pipeline import (
+    is_retryable_pipeline_error,
+    limit_generation_candidates,
+    next_generation_candidate,
+    report_counts,
+)
 from app.models import ContentCandidate, SourceWhitelist
 from app.schemas.admin import AdminContentPipelineRunPayload
 from app.services.content_pipeline.ai.article_generator import normalize_article_payload, queue_article_generation
@@ -20,7 +25,13 @@ from app.services.content_pipeline.ai.prompts import (
 )
 from app.services.content_pipeline.candidates import create_candidate_from_crawl
 from app.services.content_pipeline.crawlers.base import CrawledCandidate
-from app.services.content_pipeline.quality_gates import count_en_words, sentence_overlap_ratio, source_link_cta_matches
+from app.services.content_pipeline.quality_gates import (
+    contains_public_article_link,
+    count_en_words,
+    sentence_overlap_ratio,
+    source_attribution_matches,
+    source_link_cta_matches,
+)
 
 
 def candidate(candidate_id: str, category: str) -> ContentCandidate:
@@ -70,6 +81,13 @@ def test_candidate_selection_stops_only_when_pool_is_exhausted() -> None:
     assert selected is None
 
 
+def test_manual_pipeline_limits_candidate_pool_to_requested_count() -> None:
+    pool = [candidate(f"candidate-{index}", "reference_only") for index in range(10)]
+
+    assert limit_generation_candidates(pool, generation_target=3, manual_run=True) == pool[:3]
+    assert limit_generation_candidates(pool, generation_target=3, manual_run=False) == pool
+
+
 def test_overlap_gate_ignores_short_common_phrase_but_flags_long_copy() -> None:
     item = cast(
         ContentCandidate,
@@ -83,7 +101,7 @@ def test_overlap_gate_ignores_short_common_phrase_but_flags_long_copy() -> None:
     assert sentence_overlap_ratio(item, "alpha beta gamma delta epsilon zeta eta theta iota kappa") > 0.35
 
 
-def test_editor_agent_receives_writer_draft_and_source_url() -> None:
+def test_editor_agent_removes_source_references_from_public_copy() -> None:
     item = cast(
         ContentCandidate,
         SimpleNamespace(source_url="https://example.com/story"),
@@ -97,14 +115,29 @@ def test_editor_agent_receives_writer_draft_and_source_url() -> None:
 
     assert "independent senior news editor" in messages[0]["content"]
     assert "Writer draft" in messages[1]["content"]
-    assert "https://example.com/story" in messages[1]["content"]
-    assert "must not tell readers to consult another page for more content" in messages[1]["content"]
+    assert "https://example.com/story" not in messages[1]["content"]
+    assert "Do not name or credit the source publication" in messages[1]["content"]
+    assert "Do not include URLs" in messages[1]["content"]
 
 
-def test_source_link_cta_gate_blocks_read_more_phrases_but_allows_attribution() -> None:
+def test_public_article_gate_blocks_source_links_and_report_attribution() -> None:
     assert source_link_cta_matches("更多內容請參考原始報導") == ["更多內容請參考"]
     assert source_link_cta_matches("For more details, see the original report.") == ["for more details, see"]
-    assert source_link_cta_matches("根據<a href='https://example.com/story'>交通部</a>公布的資料，充電站數量增加。") == []
+    assert source_attribution_matches("根據某媒體報導，充電站數量增加。") == ["zh_source_report"]
+    assert source_attribution_matches("The operator reported that charging demand increased.") == []
+    assert contains_public_article_link(["<p><a href='https://example.com'>原始報導</a></p>"], []) is True
+    assert contains_public_article_link(["<p>充電站數量增加。</p>"], ["No URL here."]) is False
+
+
+def test_manual_pipeline_payload_limits_requested_article_count() -> None:
+    payload = AdminContentPipelineRunPayload(source_id="source-1", article_count=7)
+
+    assert payload.source_id == "source-1"
+    assert payload.article_count == 7
+    with pytest.raises(ValueError):
+        AdminContentPipelineRunPayload(article_count=0)
+    with pytest.raises(ValueError):
+        AdminContentPipelineRunPayload(article_count=21)
 
 
 def test_reviewer_can_use_a_separate_model() -> None:
@@ -262,6 +295,10 @@ async def test_manual_pipeline_endpoint_queues_background_work(monkeypatch: pyte
         async def scalar(self, statement: object) -> None:
             return None
 
+        async def get(self, model: object, item_id: str) -> SimpleNamespace:
+            assert item_id == "source-1"
+            return SimpleNamespace(id=item_id, enabled=True)
+
         async def commit(self) -> None:
             self.committed = True
 
@@ -274,7 +311,7 @@ async def test_manual_pipeline_endpoint_queues_background_work(monkeypatch: pyte
     tasks = BackgroundTasks()
 
     result = await admin_api.run_admin_content_pipeline(
-        AdminContentPipelineRunPayload(date="2026-07-13", dry_run=True),
+        AdminContentPipelineRunPayload(date="2026-07-13", dry_run=True, source_id="source-1", article_count=7),
         tasks,
         cast(object, session),
     )
@@ -284,3 +321,4 @@ async def test_manual_pipeline_endpoint_queues_background_work(monkeypatch: pyte
     assert result.already_running is False
     assert session.committed is True
     assert len(tasks.tasks) == 1
+    assert tasks.tasks[0].args[-2:] == ("source-1", 7)
